@@ -60,9 +60,11 @@ def navbar(search=None) -> rx.Component:
                         ),
                     ),
                     rx.hstack(
-                        navbar_icons_item("Schedule", "calendar-sync", "/schedule"),
-                        navbar_icons_item("playlist.m3u8", "file-down", "/playlist"),
-                        navbar_icons_item("Github", "github", "https://github.com/gookie-dev/StepDaddyLiveHD", True),
+                        navbar_icons_item(
+                            "Schedule", "calendar-sync", "/schedule"),
+                        navbar_icons_item(
+                            "playlist.m3u8", "file-down", "/playlist"),
+                        # navbar_icons_item("Github", "github", "https://github.com/Plaza4756/StepDaddyLiveHD", True),
                         spacing="6",
                     ),
                     justify=rx.breakpoints(initial="between"),
@@ -97,9 +99,11 @@ def navbar(search=None) -> rx.Component:
                                 rx.icon("menu", size=30)
                             ),
                             rx.menu.content(
-                                navbar_icons_menu_item("Schedule", "calendar-sync", "/schedule"),
-                                navbar_icons_menu_item("playlist.m3u8", "file-down", "/playlist"),
-                                navbar_icons_menu_item("Github", "github", "https://github.com/gookie-dev/StepDaddyLiveHD", True),
+                                navbar_icons_menu_item(
+                                    "Schedule", "calendar-sync", "/schedule"),
+                                navbar_icons_menu_item(
+                                    "playlist.m3u8", "file-down", "/playlist"),
+                                # navbar_icons_menu_item("Github", "github", "https://github.com/Plaza4756/StepDaddyLiveHD", True),
                             ),
                             justify="end",
                         ),
