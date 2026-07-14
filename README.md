@@ -7,9 +7,9 @@ A self-hosted IPTV proxy built with [Reflex](https://reflex.dev), enabling you t
 ## ✨ Features
 
 - **📱 Stream Anywhere**: Watch TV channels on any device via the web or media players.
-- **🔎 Event Search**: Quickly find the right channel for live events or sports.
 - **📄 Playlist Integration**: Download the `playlist.m3u8` and use it with Jellyfin or any IPTV client.
 - **⚙️ Customizable Hosting**: Host the application locally or deploy it via Docker with various configuration options.
+- **m3u8 Stream Extraction Caching**: Improves network latency from few seconds to sub 1 second. This is useful when running the container behind vpn e.g. gluetun
 
 ---
 
@@ -27,17 +27,17 @@ A self-hosted IPTV proxy built with [Reflex](https://reflex.dev), enabling you t
 Plain Docker:
 ```bash
 docker build -t step-daddy-live-hd .
-docker run -p 3000:3000 step-daddy-live-hd
+docker run -p 3535:3535 step-daddy-live-hd
 ```
 
 ---
 
 ## 🖥️ Local Installation
 
-1. Install Python 🐍 (tested with version 3.12).
+1. Install Python 🐍 (tested with version 3.13).
 2. Clone the repository and navigate into the project directory:
    ```bash
-   git clone https://github.com/gookie-dev/StepDaddyLiveHD
+   git clone https://github.com/Plaza4756/StepDaddyLiveHD
    cd StepDaddyLiveHD
    ```
 3. Create and activate a virtual environment:
@@ -64,10 +64,11 @@ docker run -p 3000:3000 step-daddy-live-hd
 
 ### Environment Variables
 
-- **PORT**: Set a custom port for the server.
+- **PORT**: Set a custom front end (web ui) port for the server.
 - **API_URL**: Set the domain or IP where the server is reachable.
 - **SOCKS5**: Proxy DLHD traffic through a SOCKS5 server if needed.
 - **PROXY_CONTENT**: Proxy video content itself through your server (optional).
+- **BACKEND_PORT**: Custom backend port for the server. Useful when running behind vpn (e.g. gluetun) and there is a port conflict. Leave unchanged otherwise.
 
 Edit the `.env` for docker compose.
 
@@ -84,7 +85,6 @@ docker run -e PROXY_CONTENT=FALSE -e API_URL=https://example.com -e SOCKS5=user:
 ### Pages Overview:
 
 - **🏠 Home**: Browse and search for TV channels.
-- **📺 Live Events**: Quickly find channels broadcasting live events and sports.
 - **📥 Playlist Download**: Download the `playlist.m3u8` file for integration with media players.
 
 ---
@@ -97,8 +97,6 @@ docker run -e PROXY_CONTENT=FALSE -e API_URL=https://example.com -e SOCKS5=user:
 **Watch Page**
 <img alt="Watch Page" src="https://files.catbox.moe/974r9w.png">
 
-**Live Events**
-<img alt="Live Events" src="https://files.catbox.moe/7oawie.png">
 
 ---
 
