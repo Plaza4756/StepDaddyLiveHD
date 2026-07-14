@@ -200,7 +200,8 @@ def watch() -> rx.Component:
                         width="100%",
                     ),
                     padding_bottom="0.3rem",
-                    width="100%",
+                    width="720px",
+                   #width="100%",
                 ),
             ),
             rx.fragment(
