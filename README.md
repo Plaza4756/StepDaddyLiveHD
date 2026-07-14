@@ -67,7 +67,7 @@ docker run -p 3535:3535 step-daddy-live-hd
 - **PORT**: Set a custom front end (web ui) port for the server.
 - **API_URL**: Set the domain or IP where the server is reachable.
 - **SOCKS5**: Proxy DLHD traffic through a SOCKS5 server if needed.
-- **PROXY_CONTENT**: Proxy video content itself through your server (optional).
+- **PROXY_CONTENT**: Proxy video content itself through your server (optional). Leave it as TRUE to avoid any CORS errors while fetching the stream.
 - **BACKEND_PORT**: Custom backend port for the server. Useful when running behind vpn (e.g. gluetun) and there is a port conflict. Leave unchanged otherwise.
 
 Edit the `.env` for docker compose.
