@@ -1,4 +1,4 @@
-ARG PORT=3000
+ARG PORT=3535
 ARG PROXY_CONTENT=TRUE
 ARG SOCKS5
 
@@ -8,17 +8,27 @@ ARG API_URL
 # It uses a reverse proxy to serve the frontend statically and proxy to backend
 # from a single exposed port, expecting TLS termination to be handled at the
 # edge by the given platform.
-FROM python:3.13 AS builder
+FROM docker.io/python:3.13 AS builder
+
+ARG uv=/root/.local/bin/uv
+
+# Install `uv` for faster package bootstrapping
+ADD --chmod=755 https://astral.sh/uv/install.sh /install.sh
+RUN /install.sh && rm /install.sh
 
 RUN mkdir -p /app/.web
-RUN python -m venv /app/.venv
-ENV PATH="/app/.venv/bin:$PATH"
+RUN mkdir -p /app/.venv
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 WORKDIR /app
 
+RUN $uv venv
+
 # Install python app requirements and reflex in the container
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN $uv pip install --upgrade pip
+RUN $uv pip install -r requirements.txt
 
 # Install reflex helper utilities like bun/node
 COPY rxconfig.py ./
@@ -33,7 +43,7 @@ RUN REFLEX_API_URL=${API_URL:-http://localhost:$PORT} reflex export --loglevel d
 
 
 # Final image with only necessary files
-FROM python:3.13-slim
+FROM docker.io/python:3.13-slim
 
 # Install Caddy and redis server inside image
 RUN apt-get update -y && apt-get install -y caddy redis-server && rm -rf /var/lib/apt/lists/*
@@ -52,5 +62,5 @@ EXPOSE $PORT
 
 # Starting the backend.
 CMD caddy start && \
-    redis-server --daemonize yes && \
-    exec reflex run --env prod --backend-only
+  redis-server --daemonize yes && \
+  exec reflex run --env prod --backend-only
