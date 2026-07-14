@@ -8,13 +8,21 @@ services:
         API_URL: ${API_URL}
         PROXY_CONTENT: ${PROXY_CONTENT}
         SOCKS5: ${SOCKS5}
+    security_opt:
+      - no-new-privileges=true
     environment:
       - PORT=${PORT}
       - API_URL=${API_URL}
       - PROXY_CONTENT=${PROXY_CONTENT}
       - SOCKS5=${SOCKS5}
+      - BACKEND_PORT=${BACKEND_PORT}
     ports:
       - "${PORT}:${PORT}"
-    restart: unless-stopped
+    restart: always
     env_file:
       - .env
+    container_name: step-daddy-live-hd
+    healthcheck:
+      test: curl -f http://127.0.0.1:3535/playlist || exit 1
+      interval: 60s
+      retries: 3
