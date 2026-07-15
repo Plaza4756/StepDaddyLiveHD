@@ -4,8 +4,7 @@ from reflex.components.component import NoSSRComponent
 
 class MediaPlayer(NoSSRComponent):
     library = "$/public/player"
-    lib_dependencies: list[str] = ["@vidstack/react@1.12.13"]
-    # lib_dependencies: list[str] = ["@vidstack/react@next"]
+    lib_dependencies: list[str] = ["@vidstack/react@next"]
     tag = "Player"
     title: rx.Var[str]
     src: rx.Var[str]
