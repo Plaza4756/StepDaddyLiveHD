@@ -1,5 +1,5 @@
-# Status
-Working fine. Report any issues.
+# 🎉 Status
+✅ Working fine. Report any issues.
 
 ---
 
