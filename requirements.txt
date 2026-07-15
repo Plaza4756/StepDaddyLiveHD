@@ -1,4 +1,4 @@
-reflex==0.9.6.post1
+reflex==0.9.6.post2
 curl-cffi==0.15.0
 python-dateutil==2.9.0.post0
 fastapi==0.139.0
