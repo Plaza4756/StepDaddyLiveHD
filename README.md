@@ -24,9 +24,30 @@ A self-hosted IPTV proxy built with [Reflex](https://reflex.dev), enabling you t
 
 1. Make sure you have Docker and Docker Compose installed on your system.
 2. Clone the repository and navigate into the project directory:
-3. Run the following command to start the application:
+   ```bash
+   git clone https://github.com/Plaza4756/StepDaddyLiveHD
+   cd StepDaddyLiveHD
+   ```
+3. Edit `.env` file as per your requirements. e.g. set `API_URL="http://<local ip>:3535"`
+4. Run the following command to start the application:
    ```bash
    docker compose up -d
+   ```
+5. Access the front end on `http://<local ip>:3535` via browser
+
+To update the container:
+1. Navigate into the project directory
+2. Bring down the container by:
+   ```bash
+   docker compose down
+   ```
+3. Pull the updates:
+   ```bash
+   git pull
+   ```
+4. Run the following command to rebuild the container and start the application:
+   ```bash
+   docker compose up -d --build
    ```
 
 Plain Docker:
