@@ -137,10 +137,10 @@ class StepDaddy:
 
                 # Extract expiry query parameter from m3u8_redirect_url
                 try:
-                    parsed_m3u8_redirect_url = urlparse(m3u8_redirect_url)
-                    expiry_param_value = parse_qs(
-                        parsed_m3u8_redirect_url.query)['expires'][0]
-                    logger.info(f"Expiry timestamp: {expiry_param_value}")
+                    matches = re.findall(r'/(\d{10,13})/', m3u8_redirect_url)
+                    if matches:
+                        expiry_param_value = matches[0]
+                        logger.info(f"Expiry timestamp: {expiry_param_value}")
                 except Exception as e:
                     logger.info(f"Error in expiry param extraction: {e}")
                     # Set aritificial ~1hr of cache expiry time in case of a failure
