@@ -1,7 +1,7 @@
 import json
 import re
 from pydantic import BaseModel
-from urllib.parse import urlparse, urljoin, parse_qs
+from urllib.parse import urlparse, urljoin
 from curl_cffi.requests import AsyncSession, RetryStrategy
 from typing import List
 from .utils import encrypt, decrypt, urlsafe_base64
@@ -35,13 +35,12 @@ class StepDaddy:
             count=3, delay=0.5, jitter=0.1, backoff="exponential")
         if socks5 != "":
             self._session = AsyncSession(
-                proxy="socks5://" + socks5, impersonate="chrome", retry=strategy, allow_redirects="safe")
+                proxy="socks5://" + socks5, impersonate="chrome146", retry=strategy, allow_redirects="safe")
         else:
             self._session = AsyncSession(
                 impersonate="chrome146", retry=strategy, allow_redirects="safe")
         self._base_url = "https://dlhd.st"
         self.channels = []
-        self.channel_auth_done = False
         with open("StepDaddyLiveHD/meta.json", "r") as f:
             self._meta = json.load(f)
         self._cache = {}  # To cache server url
@@ -55,7 +54,6 @@ class StepDaddy:
             referer = self._base_url
         headers = {
             "Referer": referer,
-            "user-agent": self._ua,
         }
         if origin:
             headers["Origin"] = origin
