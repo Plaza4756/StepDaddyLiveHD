@@ -46,7 +46,7 @@ RUN REFLEX_API_URL=${API_URL:-http://localhost:$PORT} reflex export --loglevel d
 FROM docker.io/python:3.13-slim
 
 # Install Caddy and redis server inside image
-RUN apt-get update -y && apt-get install -y caddy redis-server && rm -rf /var/lib/apt/lists/*
+RUN apt-get update -y && apt-get install -y caddy redis-server curl && rm -rf /var/lib/apt/lists/*
 
 ARG PORT API_URL
 ENV PATH="/app/.venv/bin:$PATH" PORT=$PORT REFLEX_API_URL=${API_URL:-http://localhost:$PORT} REDIS_URL=redis://localhost PYTHONUNBUFFERED=1 PROXY_CONTENT=${PROXY_CONTENT:-TRUE} SOCKS5=${SOCKS5:-""}
