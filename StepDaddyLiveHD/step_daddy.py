@@ -39,7 +39,7 @@ class StepDaddy:
         else:
             self._session = AsyncSession(
                 impersonate="chrome146", retry=strategy, allow_redirects="safe")
-        self._base_url = "https://dlhd.st"
+        self._base_url = "https://dlstreams.st"
         self.channels = []
         with open("StepDaddyLiveHD/meta.json", "r") as f:
             self._meta = json.load(f)
