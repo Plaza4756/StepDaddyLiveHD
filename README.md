@@ -28,8 +28,8 @@ A self-hosted IPTV proxy built with [Reflex](https://reflex.dev), enabling you t
    git clone https://github.com/Plaza4756/StepDaddyLiveHD
    cd StepDaddyLiveHD
    ```
-3. Edit `.env` file as per your requirements. e.g. set `API_URL="http://<local ip>:3535"`
-4. Run the following command to start the application:
+3. Edit `.env` file as per your requirements. e.g. set `REFLEX_API_URL=http://<local ip>:3535`
+4. Run the following command to start the application (local image will be created first time):
    ```bash
    docker compose up -d
    ```
@@ -91,17 +91,17 @@ docker run -p 3535:3535 step-daddy-live-hd
 ### Environment Variables
 
 - **PORT**: Set a custom front end (web ui) port for the server.
-- **API_URL**: Set the domain or IP where the server is reachable.
+- **REFLEX_API_URL**: Set the domain or IP where the server is reachable.
 - **SOCKS5**: Proxy DLHD traffic through a SOCKS5 server if needed.
 - **PROXY_CONTENT**: Proxy video content itself through your server (optional). Leave it as TRUE to avoid any CORS errors while fetching the stream.
-- **BACKEND_PORT**: Custom backend port for the server. Useful when running behind vpn (e.g. gluetun) and there is a port conflict. Leave unchanged otherwise.
+- **REFLEX_BACKEND_PORT**: Custom backend port for the server. Useful when running behind vpn (e.g. gluetun) and there is a port conflict. Leave unchanged otherwise.
 
 Edit the `.env` for docker compose.
 
 ### Example Docker Command
 ```bash
-docker build --build-arg PROXY_CONTENT=FALSE --build-arg API_URL=https://example.com --build-arg SOCKS5=user:password@proxy.example.com:1080 -t step-daddy-live-hd .
-docker run -e PROXY_CONTENT=FALSE -e API_URL=https://example.com -e SOCKS5=user:password@proxy.example.com:1080 -p 3535:3535 step-daddy-live-hd
+docker build --build-arg PROXY_CONTENT=FALSE --build-arg REFLEX_API_URL=https://example.com --build-arg SOCKS5=user:password@proxy.example.com:1080 -t step-daddy-live-hd .
+docker run -e PROXY_CONTENT=FALSE -e REFLEX_API_URL=https://example.com -e SOCKS5=user:password@proxy.example.com:1080 -p 3535:3535 step-daddy-live-hd
 ```
 
 ---
