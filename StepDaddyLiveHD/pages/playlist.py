@@ -2,6 +2,14 @@ import reflex as rx
 from rxconfig import config
 from StepDaddyLiveHD.components import navbar
 
+class PlaylistState(rx.State):
+    @rx.var
+    def api_url(self) -> str:
+        return config.api_url
+
+    @rx.var
+    def proxy_content(self) -> bool:
+        return config.proxy_content
 
 @rx.page("/playlist")
 def playlist() -> rx.Component:
@@ -12,7 +20,7 @@ def playlist() -> rx.Component:
                 rx.card(
                     rx.vstack(
                         rx.cond(
-                            config.proxy_content,
+                            PlaylistState.proxy_content,
                             rx.fragment(),
                             rx.card(
                                 rx.hstack(
@@ -51,14 +59,14 @@ def playlist() -> rx.Component:
                             rx.button(
                                 "Download Playlist",
                                 rx.icon("download", margin_right="0.5rem"),
-                                on_click=rx.redirect(f"{config.api_url}/playlist.m3u8", is_external=True),
+                                on_click=rx.redirect(f"{PlaylistState.api_url}/playlist.m3u8", is_external=True),
                                 size="3",
                             ),
                             rx.button(
                                 "Copy Link",
                                 rx.icon("clipboard", margin_right="0.5rem"),
                                 on_click=[
-                                    rx.set_clipboard(f"{config.api_url}/playlist.m3u8"),
+                                    rx.set_clipboard(f"{PlaylistState.api_url}/playlist.m3u8"),
                                     rx.toast("Playlist URL copied to clipboard!"),
                                 ],
                                 size="3",
@@ -73,7 +81,7 @@ def playlist() -> rx.Component:
 
                         rx.box(
                             rx.text(
-                                f"{config.api_url}/playlist.m3u8",
+                                f"{PlaylistState.api_url}/playlist.m3u8",
                                 font_family="mono",
                                 font_size="sm",
                             ),
