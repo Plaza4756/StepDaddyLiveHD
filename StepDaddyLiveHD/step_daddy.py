@@ -35,10 +35,10 @@ class StepDaddy:
             count=3, delay=0.5, jitter=0.1, backoff="exponential")
         if socks5 != "":
             self._session = AsyncSession(
-                proxy="socks5://" + socks5, impersonate="chrome146", retry=strategy, allow_redirects="safe")
+                proxy="socks5://" + socks5, impersonate="chrome150", retry=strategy, allow_redirects="safe")
         else:
             self._session = AsyncSession(
-                impersonate="chrome146", retry=strategy, allow_redirects="safe")
+                impersonate="chrome150", retry=strategy, allow_redirects="safe")
         self._base_url = "https://dlstreams.st"
         self.channels = []
         with open("StepDaddyLiveHD/meta.json", "r") as f:
@@ -46,7 +46,7 @@ class StepDaddy:
         self._cache = {}  # To cache server url
         # Cookies to be set by Flaresolverr first and used by curl_cffi subsequently
         self._cookies = {}
-        self._ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+        self._ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
         
 
     def _headers(self, referer: str = None, origin: str = None):
