@@ -49,7 +49,7 @@ FROM docker.io/python:3.13-slim
 RUN apt-get update -y && apt-get install -y caddy redis-server curl && rm -rf /var/lib/apt/lists/*
 
 ARG PORT API_URL
-ENV PATH="/app/.venv/bin:$PATH" PORT=$PORT REFLEX_API_URL=${API_URL:-http://localhost:$PORT} REDIS_URL=redis://localhost PYTHONUNBUFFERED=1 PROXY_CONTENT=${PROXY_CONTENT:-TRUE} SOCKS5=${SOCKS5:-""}
+ENV PATH="/app/.venv/bin:$PATH" PORT=$PORT REFLEX_API_URL=${API_URL:-http://localhost:$PORT} REFLEX_REDIS_URL=redis://localhost PYTHONUNBUFFERED=1 PROXY_CONTENT=${PROXY_CONTENT:-TRUE} SOCKS5=${SOCKS5:-""} REFLEX_CHECK_LATEST_VERSION=FALSE
 
 WORKDIR /app
 COPY --from=builder /app /app
@@ -63,4 +63,4 @@ EXPOSE $PORT
 # Starting the backend.
 CMD caddy start && \
   redis-server --daemonize yes && \
-  exec reflex run --env prod --backend-only
+  exec reflex run --env dev --backend-only
