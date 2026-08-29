@@ -29,7 +29,7 @@ A self-hosted IPTV proxy built with [Reflex](https://reflex.dev), enabling you t
    cd StepDaddyLiveHD
    ```
 3. Edit `.env` file as per your requirements. e.g. set `API_URL="http://<local ip>:3535"`
-4. Run the following command to start the application:
+4. Run the following command to start the application (Very first run will build the local image first. Any `.env` changes afterwards requires rebuilding the image by applying `--build` switch to compose command):
    ```bash
    docker compose up -d
    ```
@@ -126,6 +126,6 @@ docker run -e PROXY_CONTENT=FALSE -e API_URL=https://example.com -e SOCKS5=user:
 
 ---
 
-## 📚 Hosting Options
+## 📚 Kodi Addon
 
-Check out the [official Reflex hosting documentation](https://reflex.dev/docs/hosting/self-hosting/) for more advanced self-hosting setups!
+Check out the [dlhd-kodi](https://github.com/Plaza4756/dlhd-kodi) for Kodi addon to access the daddylive channels!
