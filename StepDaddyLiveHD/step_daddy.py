@@ -128,7 +128,7 @@ class StepDaddy:
             # which is sufficinet for js to call .m3u8 url
             try:
                 pw = await async_playwright().start()
-                browser = await pw.chromium.connect_over_cdp(config.cdp_host)
+                browser = await pw.chromium.connect_over_cdp(f"{config.cdp_host}?fingerprint=12345")
 
                 def handle_response(response):
                     check_url = str(response.url)
