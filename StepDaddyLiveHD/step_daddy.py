@@ -123,7 +123,7 @@ class StepDaddy:
             except Exception as e:
                 logger.info(f"Error: {e}")
 
-            # Logic to extract .m3u8 playlist url via claoakbrowser connection over cdp
+            # Logic to extract .m3u8 playlist url via cloakbrowser connection over cdp
             # Cloakbrowser natively runs obfuscated js on dlhd backend. We stop its execution after 11sec
             # which is sufficinet for js to call .m3u8 url
             try:
