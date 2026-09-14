@@ -155,6 +155,9 @@ class StepDaddy:
                 m3u8_playlist_url = self._cache["m3u8_playlist_url"]
                 self._cache["channel"] = channel_id
 
+                await pw.stop()
+                await self._session.post(f"{config.cdp_host}/fingerprint/12345/close")
+
             except Exception as e:
                 logger.info(f"Error: {e}")
 
