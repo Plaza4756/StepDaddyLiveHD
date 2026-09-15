@@ -1,7 +1,5 @@
 # 🎉 Status
 ✅ Working fine. Report any issues.
-
-> ⚠️ **Important:** Recent DLHD backend changes require heavily obfuscated javascript to run in oder to get m3u8 playlist url. This requires native browser engine environment (cloakbrowser sidecar container) along with the python based extractor. Make sure you have fresh clone/pull of all the updated files from the repo.
 ---
 
 # StepDaddyLiveHD 🚀
