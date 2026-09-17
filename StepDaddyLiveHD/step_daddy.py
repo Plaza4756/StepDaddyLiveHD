@@ -121,30 +121,51 @@ class StepDaddy:
             except Exception as e:
                 logger.info(f"Error: {e}")
 
+            # Logic to extract .m3u8 playlist url via cloakbrowser connection over cdp
+            # Cloakbrowser natively runs obfuscated js on dlhd backend. We stop its execution after 11sec
+            # which is sufficinet for js to call .m3u8 url
             try:
-                source_resp = await self._session.get(
-                    url=source_url,
-                    headers=self._headers(),
-                )
-                if (source_resp.status_code != 200):
-                    logger.info(f"Source Url fetch failed with status code: {source_resp.status_code}")
+                pw = await async_playwright().start()
+                browser = await pw.chromium.connect_over_cdp(f"{config.cdp_host}?fingerprint=12345")
 
-                m3u8_playlist_url = re.search(r'STREAM_URL\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
-                logger.info(f"m3u8 playlist url : {m3u8_playlist_url}")
+                def handle_response(response):
+                    check_url = str(response.url)
+                    if ((".m3u8" in check_url) and (response.status == 200)):
+                        self._cache["m3u8_playlist_url"] = response.url
+                        logger.info(f"m3u8_playlist_url: {response.url}")
 
-                self._cache["channel"] = channel_id
+                page = await browser.new_page()
+                page.on("response", handle_response)
+                add_extra_header = {
+                    'referer': f"{self._base_url}/",
+                    'origin': self._base_url
+                }
+                await page.set_extra_http_headers(add_extra_header)
+
+                nav_task = asyncio.create_task(page.goto(url))
+                await asyncio.sleep(11)
+
+                nav_task.cancel()
+                await browser.close()
+
                 self._cache["source_url"] = source_url
-                self._cache["m3u8_playlist_url"] = m3u8_playlist_url
+                m3u8_playlist_url = self._cache["m3u8_playlist_url"]
+                self._cache["channel"] = channel_id
+
+                await pw.stop()
+                await self._session.post(f"{config.cdp_host}/fingerprint/12345/close")
+
             except Exception as e:
                 logger.info(f"Error: {e}")
+
         try:
             m3u8_playlist_resp = await self._session.get(
                 url=m3u8_playlist_url,
                 headers=self._headers(source_url)
             )
-            if m3u8_playlist_resp.status_code != 200:
+            if (m3u8_playlist_resp.status_code != 200):
                 logger.info(f"m3u8_playlist status code: {
-                        m3u8_playlist_resp.status_code}")
+                    m3u8_playlist_resp.status_code}")
         except Exception as e:
             logger.info(f"Error: {e}")
 
@@ -161,6 +182,7 @@ class StepDaddy:
                 line = f"{
                     config.api_url}/content/{encrypt(line)}/{encrypt(source_url)}"
             m3u8_data += line + "\n"
+        # m3u8_data += m3u8_stream_info
         return m3u8_data
     async def key(self, url: str, host: str):
         url = decrypt(url)
