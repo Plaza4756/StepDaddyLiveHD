@@ -9,6 +9,8 @@ from rxconfig import config
 import html
 
 import logging
+import asyncio
+from playwright.async_api import async_playwright
 
 logging.basicConfig(
     level=logging.INFO,
