@@ -5,7 +5,6 @@ import os
 proxy_content = os.environ.get("PROXY_CONTENT", "TRUE").upper() == "TRUE"
 socks5 = os.environ.get("SOCKS5", "")
 backend_port = os.environ.get("BACKEND_PORT", "8004")
-cdp_host = os.environ.get("CDP_HOST", "http://cloakbrowser:9222")
 
 print(f"PROXY_CONTENT: {proxy_content}\nSOCKS5: {socks5}")
 
@@ -15,7 +14,6 @@ config = rx.Config(
     backend_port=int(backend_port),
     telemetry_enabled=False,
     socks5=socks5,
-    cdp_host=cdp_host,
     show_built_with_reflex=False,
     plugins=[
         rx.plugins.SitemapPlugin(),

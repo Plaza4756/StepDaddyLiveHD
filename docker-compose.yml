@@ -16,7 +16,6 @@ services:
       - PROXY_CONTENT=${PROXY_CONTENT}
       - SOCKS5=${SOCKS5}
       - BACKEND_PORT=${BACKEND_PORT}
-      - CDP_HOST=${CDP_HOST}
     ports:
       - "${PORT}:${PORT}"
     restart: always
@@ -24,14 +23,6 @@ services:
       - .env
     container_name: step-daddy-live-hd
     healthcheck:
-      test: curl -f http://127.0.0.1:3535/playlist || exit 1
+      test: curl -f http://127.0.0.1:${PORT}/playlist || exit 1
       interval: 60s
       retries: 3
-
-  cloakbrowser:
-    image: cloakhq/cloakbrowser
-    command: cloakserve
-    restart: unless-stopped
-    # ports:
-    #   - "127.0.0.1:9222:9222"
-    container_name: cloakbrowser
