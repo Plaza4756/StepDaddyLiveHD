@@ -1,16 +1,15 @@
 import json
 import re
 from pydantic import BaseModel
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, parse_qs
 from curl_cffi.requests import AsyncSession, RetryStrategy
 from typing import List
 from .utils import encrypt, decrypt, urlsafe_base64
 from rxconfig import config
 import html
-
+import time
 import logging
-import asyncio
-from playwright.async_api import async_playwright
+import base64
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,10 +32,10 @@ class StepDaddy:
             count=3, delay=0.5, jitter=0.1, backoff="exponential")
         if socks5 != "":
             self._session = AsyncSession(
-                proxy="socks5://" + socks5, impersonate="chrome146", retry=strategy, allow_redirects="safe")
+                proxy="socks5://" + socks5, impersonate="chrome150", retry=strategy, allow_redirects="safe")
         else:
             self._session = AsyncSession(
-                impersonate="chrome146", retry=strategy, allow_redirects="safe")
+                impersonate="chrome150", retry=strategy, allow_redirects="safe")
         self._base_url = "https://dlive.sx"
         self.channels = []
         with open("StepDaddyLiveHD/meta.json", "r") as f:
@@ -44,7 +43,7 @@ class StepDaddy:
         self._cache = {}  # To cache server url
         # Cookies to be set by Flaresolverr first and used by curl_cffi subsequently
         self._cookies = {}
-        self._ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+        self._ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 
     def _headers(self, referer: str = None, origin: str = None):
         if referer is None:
@@ -54,7 +53,6 @@ class StepDaddy:
             referer = f"{ref_com.scheme}://{ref_com.netloc}/"
         headers = {
             "referer": referer,
-            "user-agent": self._ua,
         }
         if origin:
             headers["origin"] = origin
@@ -82,7 +80,6 @@ class StepDaddy:
 
             matches = re.findall(
                 r'<a class="card"\s+href="/watch\.php\?id=(\d+)"[^>]*>\s*<div class="card__title">(.*?)</div>',
-                # response,
                 response.text,
                 re.DOTALL
             )
@@ -101,7 +98,8 @@ class StepDaddy:
                 channel.name.startswith("18"), channel.name))
 
     async def stream(self, channel_id: str):
-        if (self._cache.get("channel") == channel_id):
+        current_ts = int(time.time())
+        if (self._cache.get("channel") == channel_id) and (current_ts < self._cache.get("expiry")):
             source_url = self._cache["source_url"]
             m3u8_playlist_url = self._cache["m3u8_playlist_url"]
         else:
@@ -123,39 +121,42 @@ class StepDaddy:
             except Exception as e:
                 logger.info(f"Error: {e}")
 
-            # Logic to extract .m3u8 playlist url via cloakbrowser connection over cdp
-            # Cloakbrowser natively runs obfuscated js on dlhd backend. We stop its execution after 11sec
-            # which is sufficinet for js to call .m3u8 url
             try:
-                pw = await async_playwright().start()
-                browser = await pw.chromium.connect_over_cdp(f"{config.cdp_host}?fingerprint=12345")
+                source_resp = await self._session.get(
+                    url=source_url,
+                    headers=self._headers(),
+                )
+                if source_resp.status_code != 200:
+                    logger.info(f"{source_url} failed with code {source_resp.status_code}")
+                    
+                # De-obfucated js logic to extract m3u8_playlist_url
+                econfig = re.search(r"window\._econfig\s*=\s*['\"]([^'\"]+)['\"]", source_resp.text).group(1)
+                outer = base64.b64decode(econfig).decode("utf-8")
+                q = len(outer) // 4
+                chunks = [outer[i:i+q] for i in range(0, q*4, q)]
+                reordered = [None] * 4
+                for source_index, destination_index in enumerate([2, 0, 3, 1]):
+                    c = chunks[source_index]
+                    c = c[:3] + c[4:]
+                    reordered[destination_index] = base64.b64decode(c).decode("utf-8")
+                decoded_config = json.loads(base64.b64decode("".join(reordered)).decode("utf-8"))
+                m3u8_playlist_url = decoded_config.get("stream_url_nop2p") or decoded_config.get("stream_url")
+                logger.info(f"m3u8_playlist_url: {m3u8_playlist_url}")
 
-                def handle_response(response):
-                    check_url = str(response.url)
-                    if ((".m3u8" in check_url) and (response.status == 200)):
-                        self._cache["m3u8_playlist_url"] = response.url
-                        logger.info(f"m3u8_playlist_url: {response.url}")
-
-                page = await browser.new_page()
-                page.on("response", handle_response)
-                add_extra_header = {
-                    'referer': f"{self._base_url}/",
-                    'origin': self._base_url
-                }
-                await page.set_extra_http_headers(add_extra_header)
-
-                nav_task = asyncio.create_task(page.goto(url))
-                await asyncio.sleep(11)
-
-                nav_task.cancel()
-                await browser.close()
-
+                # Extract expiry query parameter from m3u8_playlist_url
+                try:
+                    parsed_m3u8_playlist_url = urlparse(m3u8_playlist_url)
+                    expiry = int(parse_qs(parsed_m3u8_playlist_url.query)['e'][0])
+                    logger.info(f"Cache m3u8_playlist_url till timestamp: {expiry}")
+                except Exception as e:
+                    logger.info(f"Error in expiry parameter extraction: {e}")
+                    # Set artificial approx 1hr cache expiry time
+                    expiry = current_ts + 3500
+                
                 self._cache["source_url"] = source_url
-                m3u8_playlist_url = self._cache["m3u8_playlist_url"]
+                self._cache["m3u8_playlist_url"] = m3u8_playlist_url
                 self._cache["channel"] = channel_id
-
-                await pw.stop()
-                await self._session.post(f"{config.cdp_host}/fingerprint/12345/close")
+                self._cache["expiry"] = expiry
 
             except Exception as e:
                 logger.info(f"Error: {e}")
@@ -165,9 +166,9 @@ class StepDaddy:
                 url=m3u8_playlist_url,
                 headers=self._headers(source_url)
             )
-            if (m3u8_playlist_resp.status_code != 200):
+            if m3u8_playlist_resp.status_code != 200:
                 logger.info(f"m3u8_playlist status code: {
-                    m3u8_playlist_resp.status_code}")
+                        m3u8_playlist_resp.status_code}")
         except Exception as e:
             logger.info(f"Error: {e}")
 
@@ -184,8 +185,8 @@ class StepDaddy:
                 line = f"{
                     config.api_url}/content/{encrypt(line)}/{encrypt(source_url)}"
             m3u8_data += line + "\n"
-        # m3u8_data += m3u8_stream_info
         return m3u8_data
+
     async def key(self, url: str, host: str):
         url = decrypt(url)
         host = decrypt(host)
