@@ -23,6 +23,6 @@ services:
       - .env
     container_name: step-daddy-live-hd
     healthcheck:
-      test: curl -f http://127.0.0.1:3535/playlist || exit 1
+      test: curl -f http://127.0.0.1:${PORT}/playlist || exit 1
       interval: 60s
       retries: 3
