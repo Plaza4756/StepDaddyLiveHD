@@ -1,66 +1,67 @@
+# check=skip=JSONArgsRecommended
+# Single-container Reflex deployment for services like Render, Railway, Heroku,
+# GCP, and others. Caddy serves the exported frontend and proxies backend routes
+# from a single exposed port; TLS termination is expected at the platform edge.
+
+# If the service expects a different port, provide it here (f.e Render expects port 10000)
 ARG PORT=3535
+# Extra for the container
 ARG PROXY_CONTENT=TRUE
 ARG SOCKS5
-
 # Only set for local/direct access. When TLS is used, the API_URL is assumed to be the same as the frontend.
 ARG API_URL
 
-# It uses a reverse proxy to serve the frontend statically and proxy to backend
-# from a single exposed port, expecting TLS termination to be handled at the
-# edge by the given platform.
-FROM docker.io/python:3.13 AS builder
+FROM python:3.13-slim AS builder
 
-ARG uv=/root/.local/bin/uv
-
-# Install `uv` for faster package bootstrapping
-ADD --chmod=755 https://astral.sh/uv/install.sh /install.sh
-RUN /install.sh && rm /install.sh
-
-RUN mkdir -p /app/.web
-RUN mkdir -p /app/.venv
-ENV VIRTUAL_ENV=/app/.venv
-ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+# uv installs python packages; reflex uses a bun found on PATH instead of downloading its own.
+COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /bin/uv
+COPY --from=oven/bun:1 /usr/local/bin/bun /usr/local/bin/bun
+ENV UV_COMPILE_BYTECODE=1 UV_NO_CACHE=1 PATH="/app/.venv/bin:$PATH"
 
 WORKDIR /app
 
-RUN $uv venv
-
-# Install python app requirements and reflex in the container
+# Install python requirements first so app edits do not reinstall them.
 COPY requirements.txt .
-RUN $uv pip install --upgrade pip
-RUN $uv pip install -r requirements.txt
-
-# Install reflex helper utilities like bun/node
-COPY rxconfig.py ./
-RUN reflex init
+COPY rxconfig.py .
+RUN uv venv && uv pip install -r requirements.txt
 
 # Copy local context to `/app` inside container (see .dockerignore)
 COPY . .
 
 ARG PORT API_URL PROXY_CONTENT SOCKS5
-# Download other npm dependencies and compile frontend
-RUN REFLEX_API_URL=${API_URL:-http://localhost:$PORT} reflex export --loglevel debug --frontend-only --no-zip && mv .web/build/client/* /srv/ && rm -rf .web
+# Compile the app and build the static frontend. The cache mount keeps bun's
+# package cache between builds so unchanged dependencies are not downloaded again.
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    REFLEX_API_URL=${API_URL:-http://localhost:$PORT} reflex export --frontend-only --no-zip
 
 
-# Final image with only necessary files
-FROM docker.io/python:3.13-slim
+# Final image: the python environment, the app source, the static frontend for
+# caddy, and .web/backend so the backend only evaluates stateful pages at startup.
+FROM python:3.13-slim
 
-# Install Caddy and redis server inside image
-RUN apt-get update -y && apt-get install -y caddy redis-server curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update -y && apt-get install -y --no-install-recommends redis-server curl && rm -rf /var/lib/apt/lists/*
+COPY --from=caddy:2 /usr/bin/caddy /usr/bin/caddy
 
 ARG PORT API_URL
-ENV PATH="/app/.venv/bin:$PATH" PORT=$PORT REFLEX_API_URL=${API_URL:-http://localhost:$PORT} REFLEX_REDIS_URL=redis://localhost PYTHONUNBUFFERED=1 PROXY_CONTENT=${PROXY_CONTENT:-TRUE} SOCKS5=${SOCKS5:-""} REFLEX_CHECK_LATEST_VERSION=FALSE
+ENV PATH="/app/.venv/bin:$PATH" PORT=$PORT REFLEX_REDIS_URL=redis://localhost PYTHONUNBUFFERED=1
+ENV REFLEX_API_URL=${API_URL:-http://localhost:$PORT} PROXY_CONTENT=${PROXY_CONTENT:-TRUE} SOCKS5=${SOCKS5:-""} REFLEX_CHECK_LATEST_VERSION=FALSE
+ENV GRANIAN_WORKERS=1
 
 WORKDIR /app
-COPY --from=builder /app /app
-COPY --from=builder /srv /srv
-
-# Needed until Reflex properly passes SIGTERM on backend.
-STOPSIGNAL SIGKILL
+# The app user needs to own /app itself so reflex can create .states there.
+# Caddy keeps its state under $HOME and redis its dump in the workdir, both
+# of which resolve to /app. PORT must stay above 1024 for the unprivileged bind.
+RUN adduser --disabled-password --gecos "" --home /app reflex && chown reflex /app
+COPY --chown=reflex --from=builder /app/.venv .venv
+COPY --chown=reflex --from=builder /app/.web/backend .web/backend
+COPY --from=builder /app/.web/build/client /srv
+COPY --chown=reflex . .
+USER reflex
 
 EXPOSE $PORT
 
-# Starting the backend.
-CMD caddy start && \
-  redis-server --daemonize yes && \
-  exec reflex run --env dev --backend-only
+# Apply migrations before starting the backend; a failed migration stops the container.
+CMD if [ -d alembic ]; then reflex db migrate; fi && \
+    caddy start && \
+    redis-server --daemonize yes && \
+    exec reflex run --env prod --backend-only
