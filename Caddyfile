@@ -11,6 +11,11 @@ handle {
 	root * /srv
 	route {
 		try_files {path} {path}/ /404.html
-		file_server
+    	# Serve the pre-compressed .gz copies Reflex writes for text assets at
+	  	# export time; .br/.zst copies exist only if frontend_compression_formats
+	  	# includes brotli/zstd.
+	  	file_server {
+		  precompressed br zstd gzip
+	  	}
 	}
 }
