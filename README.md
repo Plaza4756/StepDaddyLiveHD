@@ -1,6 +1,7 @@
 # 🎉 Status
 ✅ Working fine. Report any issues.
 
+> ⚠️ **Important:** Now the project provides pre-compiled docker images synced to latest commits. No more local image build required. Make sure you have latest commits for repo pulled. Note the changes in `docker-compose.yml` and `.env` files.
 ---
 
 # StepDaddyLiveHD 🚀
