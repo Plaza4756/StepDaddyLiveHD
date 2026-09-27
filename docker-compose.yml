@@ -1,21 +1,14 @@
 services:
   step-daddy-live-hd:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        PORT: ${PORT}
-        API_URL: ${API_URL}
-        PROXY_CONTENT: ${PROXY_CONTENT}
-        SOCKS5: ${SOCKS5}
+    image: ghcr.io/plaza4756/step-daddy-live-hd:latest
     security_opt:
       - no-new-privileges=true
     environment:
       - PORT=${PORT}
-      - API_URL=${API_URL}
+      - REFLEX_API_URL=${REFLEX_API_URL}
       - PROXY_CONTENT=${PROXY_CONTENT}
       - SOCKS5=${SOCKS5}
-      - BACKEND_PORT=${BACKEND_PORT}
+      - REFLEX_BACKEND_PORT=${REFLEX_BACKEND_PORT}
     ports:
       - "${PORT}:${PORT}"
     restart: always
