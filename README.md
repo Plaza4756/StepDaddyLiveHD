@@ -20,7 +20,7 @@ A self-hosted IPTV proxy built with [Reflex](https://reflex.dev), enabling you t
 
 ## 🐳 Docker Installation (Recommended)
 
-> ⚠️ **Important:** If you plan to use this application across your local network (LAN), you must set `API_URL` to the **local IP address** of the device hosting the server in `.env`.
+> ⚠️ **Important:** If you plan to use this application across your local network (LAN), you must set `REFLEX_API_URL` to the **local IP address** of the device hosting the server in `.env`.
 
 1. Make sure you have Docker and Docker Compose installed on your system.
 2. Clone the repository and navigate into the project directory:
@@ -28,34 +28,19 @@ A self-hosted IPTV proxy built with [Reflex](https://reflex.dev), enabling you t
    git clone https://github.com/Plaza4756/StepDaddyLiveHD
    cd StepDaddyLiveHD
    ```
-3. Edit `.env` file as per your requirements. e.g. set `API_URL="http://<local ip>:3535"`
-4. Run the following command to start the application (Very first run will build the local image first. Any `.env` changes afterwards requires rebuilding the image by applying `--build` switch to compose command):
+3. Edit `.env` file as per your requirements. e.g. set `REFLEX_API_URL=http://<local ip>:3535`
+4. Run the following command to start the application:
    ```bash
    docker compose up -d
    ```
 5. Access the front end on `http://<local ip>:3535` via browser
 
-To update the container:
+To locally build the container image for developement:
 1. Navigate into the project directory
-2. Bring down the container by:
+2. Run the following command to build the container and start the application::
    ```bash
-   docker compose down
+   docker compose -f docker-compose-dev.yml up -d --build
    ```
-3. Pull the updates:
-   ```bash
-   git pull
-   ```
-4. Run the following command to rebuild the container and start the application:
-   ```bash
-   docker compose up -d --build
-   ```
-
-Plain Docker:
-```bash
-docker build -t step-daddy-live-hd .
-docker run -p 3535:3535 step-daddy-live-hd
-```
-
 ---
 
 ## 🖥️ Local Installation
@@ -91,18 +76,10 @@ docker run -p 3535:3535 step-daddy-live-hd
 ### Environment Variables
 
 - **PORT**: Set a custom front end (web ui) port for the server.
-- **API_URL**: Set the domain or IP where the server is reachable.
+- **REFLEX_API_URL**: Set the domain or IP where the server is reachable.
 - **SOCKS5**: Proxy DLHD traffic through a SOCKS5 server if needed.
 - **PROXY_CONTENT**: Proxy video content itself through your server (optional). Leave it as TRUE to avoid any CORS errors while fetching the stream.
-- **BACKEND_PORT**: Custom backend port for the server. Useful when running behind vpn (e.g. gluetun) and there is a port conflict. Leave unchanged otherwise.
-
-Edit the `.env` for docker compose.
-
-### Example Docker Command
-```bash
-docker build --build-arg PROXY_CONTENT=FALSE --build-arg API_URL=https://example.com --build-arg SOCKS5=user:password@proxy.example.com:1080 -t step-daddy-live-hd .
-docker run -e PROXY_CONTENT=FALSE -e API_URL=https://example.com -e SOCKS5=user:password@proxy.example.com:1080 -p 3535:3535 step-daddy-live-hd
-```
+- **REFLEX_BACKEND_PORT**: Custom backend port for the server. Useful when running behind vpn (e.g. gluetun) and there is a port conflict. Leave unchanged otherwise.
 
 ---
 
