@@ -122,9 +122,11 @@ class StepDaddy:
                 logger.info(f"Error: {e}")
 
             try:
+                source_headers = self._headers()
+                source_headers["Sec-Fetch-Dest"] = "iframe"
                 source_resp = await self._session.get(
                     url=source_url,
-                    headers=self._headers(),
+                    headers=source_headers,
                 )
                 if source_resp.status_code != 200:
                     logger.info(f"{source_url} failed with code {source_resp.status_code}")
