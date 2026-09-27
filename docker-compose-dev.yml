@@ -1,0 +1,28 @@
+services:
+  step-daddy-live-hd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PORT: ${PORT}
+        REFLEX_API_URL: ${REFLEX_API_URL}
+        PROXY_CONTENT: ${PROXY_CONTENT}
+        SOCKS5: ${SOCKS5}
+    security_opt:
+      - no-new-privileges=true
+    environment:
+      - PORT=${PORT}
+      - REFLEX_API_URL=${API_URL}
+      - PROXY_CONTENT=${PROXY_CONTENT}
+      - SOCKS5=${SOCKS5}
+      - REFLEX_BACKEND_PORT=${BACKEND_PORT}
+    ports:
+      - "${PORT}:${PORT}"
+    restart: always
+    env_file:
+      - .env
+    container_name: step-daddy-live-hd
+    healthcheck:
+      test: curl -f http://127.0.0.1:${PORT}/playlist || exit 1
+      interval: 60s
+      retries: 3
