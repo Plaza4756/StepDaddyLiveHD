@@ -70,10 +70,6 @@ def index() -> rx.Component:
 
 
 app = rx.App(
-    theme=rx.theme(
-        appearance="dark",
-        accent_color="red",
-    ),
     api_transformer=backend.fastapi_app,
 )
 
