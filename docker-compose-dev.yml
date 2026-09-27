@@ -1,6 +1,13 @@
 services:
   step-daddy-live-hd:
-    image: ghcr.io/plaza4756/step-daddy-live-hd:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PORT: ${PORT}
+        REFLEX_API_URL: ${REFLEX_API_URL}
+        PROXY_CONTENT: ${PROXY_CONTENT}
+        SOCKS5: ${SOCKS5}
     security_opt:
       - no-new-privileges=true
     environment:

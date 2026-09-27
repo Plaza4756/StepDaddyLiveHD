@@ -3,6 +3,16 @@ from rxconfig import config
 from StepDaddyLiveHD.components import navbar
 
 
+class PlaylistState(rx.State):
+    @rx.var
+    def api_url(self) -> str:
+        return config.api_url
+
+    @rx.var
+    def proxy_content(self) -> bool:
+        return config.proxy_content
+
+
 @rx.page("/playlist")
 def playlist() -> rx.Component:
     return rx.box(
@@ -12,7 +22,7 @@ def playlist() -> rx.Component:
                 rx.card(
                     rx.vstack(
                         rx.cond(
-                            config.proxy_content,
+                            PlaylistState.proxy_content,
                             rx.fragment(),
                             rx.card(
                                 rx.hstack(
@@ -27,7 +37,8 @@ def playlist() -> rx.Component:
                                 background_color=rx.color("accent", 7),
                             ),
                         ),
-                        rx.heading("Welcome to StepDaddyLiveHD", size="7", margin_bottom="1rem"),
+                        rx.heading("Welcome to StepDaddyLiveHD",
+                                   size="7", margin_bottom="1rem"),
                         rx.text(
                             "StepDaddyLiveHD allows you to watch various TV channels via IPTV. "
                             "You can download the playlist file below and use it with your favorite media player.",
@@ -35,7 +46,8 @@ def playlist() -> rx.Component:
 
                         rx.divider(margin_y="1.5rem"),
 
-                        rx.heading("How to Use", size="5", margin_bottom="0.5rem"),
+                        rx.heading("How to Use", size="5",
+                                   margin_bottom="0.5rem"),
                         rx.text(
                             "1. Copy the link below or download the playlist file",
                             margin_bottom="0.5rem",
@@ -51,15 +63,18 @@ def playlist() -> rx.Component:
                             rx.button(
                                 "Download Playlist",
                                 rx.icon("download", margin_right="0.5rem"),
-                                on_click=rx.redirect(f"{config.api_url}/playlist.m3u8", is_external=True),
+                                on_click=rx.redirect(
+                                    f"{PlaylistState.api_url}/playlist.m3u8", is_external=True),
                                 size="3",
                             ),
                             rx.button(
                                 "Copy Link",
                                 rx.icon("clipboard", margin_right="0.5rem"),
                                 on_click=[
-                                    rx.set_clipboard(f"{config.api_url}/playlist.m3u8"),
-                                    rx.toast("Playlist URL copied to clipboard!"),
+                                    rx.set_clipboard(
+                                        f"{PlaylistState.api_url}/playlist.m3u8"),
+                                    rx.toast(
+                                        "Playlist URL copied to clipboard!"),
                                 ],
                                 size="3",
                                 # variant="soft",
@@ -73,7 +88,7 @@ def playlist() -> rx.Component:
 
                         rx.box(
                             rx.text(
-                                f"{config.api_url}/playlist.m3u8",
+                                f"{PlaylistState.api_url}/playlist.m3u8",
                                 font_family="mono",
                                 font_size="sm",
                             ),
@@ -86,7 +101,8 @@ def playlist() -> rx.Component:
 
                         rx.divider(margin_y="1rem"),
 
-                        rx.heading("Compatible Players", size="5", margin_bottom="1rem"),
+                        rx.heading("Compatible Players", size="5",
+                                   margin_bottom="1rem"),
                         rx.text(
                             "You can use the m3u8 playlist with most media players and IPTV applications:",
                             margin_bottom="1rem",
@@ -94,7 +110,8 @@ def playlist() -> rx.Component:
                         rx.card(
                             rx.vstack(
                                 rx.heading("VLC Media Player", size="6"),
-                                rx.text("Popular free and open-source media player"),
+                                rx.text(
+                                    "Popular free and open-source media player"),
                                 rx.spacer(),
                                 rx.link(
                                     "Download",
@@ -113,7 +130,8 @@ def playlist() -> rx.Component:
                         rx.card(
                             rx.vstack(
                                 rx.heading("IPTVnator", size="6"),
-                                rx.text("Cross-platform IPTV player application"),
+                                rx.text(
+                                    "Cross-platform IPTV player application"),
                                 rx.spacer(),
                                 rx.link(
                                     "Download",
@@ -132,7 +150,8 @@ def playlist() -> rx.Component:
                         rx.card(
                             rx.vstack(
                                 rx.heading("Jellyfin", size="6"),
-                                rx.text("Free media system to manage your media"),
+                                rx.text(
+                                    "Free media system to manage your media"),
                                 rx.spacer(),
                                 rx.link(
                                     "Download",
