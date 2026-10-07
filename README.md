@@ -1,7 +1,6 @@
 # 🎉 Status
 ✅ Working fine. Report any issues.
 
-> ⚠️ **Important:** Now the project provides pre-compiled docker images synced to latest commits. No more local image build required. Make sure you have latest commits for repo pulled. Note the changes in `docker-compose.yml` and `.env` files.
 ---
 
 # StepDaddyLiveHD 🚀
@@ -35,6 +34,21 @@ A self-hosted IPTV proxy built with [Reflex](https://reflex.dev), enabling you t
    docker compose up -d
    ```
 5. Access the front end on `http://<local ip>:3535` via browser
+
+To update the container when there are new commits to repo:
+1. Navigate into project directory
+2. Stop the running running application by
+   ```bash
+   docker compose down
+   ```
+3. Pull the latest image by
+   ```bash
+   docker compose pull
+   ```
+4. Restart the application with latest changes by
+   ```bash
+   docker compose up -d
+   ```
 
 To locally build the container image for developement:
 1. Navigate into the project directory
