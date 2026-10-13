@@ -37,7 +37,7 @@ A self-hosted IPTV proxy built with [Reflex](https://reflex.dev), enabling you t
 
 To update the container when there are new commits to repo:
 1. Navigate into project directory
-2. Stop the running running application by
+2. Stop the running application by
    ```bash
    docker compose down
    ```
