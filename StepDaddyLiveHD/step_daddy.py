@@ -119,7 +119,7 @@ class StepDaddy:
                 ttl = int(pt_resp.json().get("ttl"))
                 m3u8_playlist_url = f"{self._cache["m3u8_playlist_src"]}?t={token}&_={current_ts}"
                 logger.info(f"m3u8 playlist url : {m3u8_playlist_url}")
-                expiry = current_ts + ttl
+                expiry = current_ts + int(ttl*0.5)
 
                 self._cache["m3u8_playlist_url"] = m3u8_playlist_url
                 self._cache["expiry"] = expiry
@@ -170,7 +170,7 @@ class StepDaddy:
 
                 m3u8_playlist_url = f"{m3u8_playlist_src}?t={token}&_={current_ts}"
                 logger.info(f"m3u8 playlist url : {m3u8_playlist_url}")
-                expiry = current_ts + ttl
+                expiry = current_ts + int(ttl*0.5)
 
                 self._cache["source_url"] = source_url
                 self._cache["m3u8_playlist_url"] = m3u8_playlist_url
