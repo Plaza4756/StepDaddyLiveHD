@@ -55,6 +55,8 @@ class StepDaddy:
             "referer": referer,
         }
         if origin:
+            origin_com = urlparse(origin)
+            origin = f"{origin_com.scheme}://{origin_com.netloc}"
             headers["origin"] = origin
         if ("Windows" in self._ua):
             headers["sec-ch-ua-platform"] = '"Windows"'
@@ -99,9 +101,28 @@ class StepDaddy:
 
     async def stream(self, channel_id: str):
         current_ts = int(time.time())
-        if (self._cache.get("channel") == channel_id) and (current_ts < self._cache.get("expiry")):
+        if (self._cache.get("channel") == channel_id):
             source_url = self._cache["source_url"]
-            m3u8_playlist_url = self._cache["m3u8_playlist_url"]
+
+            if (current_ts < self._cache.get("expiry")):
+                m3u8_playlist_url = self._cache["m3u8_playlist_url"]
+            else:
+                #refresh playlist-token
+                pt_resp = await self._session.get(
+                    url=self._cache["playlist_token_url"],
+                    headers=self._headers(source_url,source_url),
+                )
+                if pt_resp.status_code != 200:
+                    logger.info(f"Playlist token request failed with code: {pt_resp.status_code}")
+
+                token = pt_resp.json().get("token")
+                ttl = int(pt_resp.json().get("ttl"))
+                m3u8_playlist_url = f"{self._cache["m3u8_playlist_src"]}?t={token}&_={current_ts}"
+                logger.info(f"m3u8 playlist url : {m3u8_playlist_url}")
+                expiry = current_ts + ttl
+
+                self._cache["m3u8_playlist_url"] = m3u8_playlist_url
+                self._cache["expiry"] = expiry
         else:
             logger.info("Cache miss!")
             self._cache.clear()
@@ -130,25 +151,33 @@ class StepDaddy:
                 )
                 if source_resp.status_code != 200:
                     logger.info(f"{source_url} failed with code {source_resp.status_code}")
-                    
-                m3u8_playlist_url = re.search(r'const\sSRC\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
-                m3u8_playlist_url = f"{m3u8_playlist_url}?_={current_ts}"
-                logger.info(f"m3u8 playlist url : {m3u8_playlist_url}")
 
-                # Extract expiry query parameter from m3u8_playlist_url
-                try:
-                    parsed_m3u8_playlist_url = urlparse(m3u8_playlist_url)
-                    expiry = int(parse_qs(parsed_m3u8_playlist_url.query)['e'][0])
-                    logger.info(f"Cache m3u8_playlist_url till timestamp: {expiry}")
-                except Exception as e:
-                    logger.info(f"Error in expiry parameter extraction: {e}")
-                    # Set artificial approx 1hr cache expiry time
-                    expiry = current_ts + 3500
-                
+                m3u8_playlist_src = re.search(r'const\sSRC\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
+                channel_slug = re.search(r'const\sCHANNEL\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
+                edge = re.search(r'const\sEDGE\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
+
+                playlist_token_url = f"{edge}/api/playlist-token?slug={channel_slug}"
+
+                #get playlist-token
+                pt_resp = await self._session.get(
+                    url=playlist_token_url,
+                    headers=self._headers(source_url,source_url),
+                )
+                if pt_resp.status_code != 200:
+                    logger.info(f"Playlist token request failed with code: {pt_resp.status_code}")
+                token = pt_resp.json().get("token")
+                ttl = int(pt_resp.json().get("ttl"))
+
+                m3u8_playlist_url = f"{m3u8_playlist_src}?t={token}&_={current_ts}"
+                logger.info(f"m3u8 playlist url : {m3u8_playlist_url}")
+                expiry = current_ts + ttl
+
                 self._cache["source_url"] = source_url
                 self._cache["m3u8_playlist_url"] = m3u8_playlist_url
                 self._cache["channel"] = channel_id
                 self._cache["expiry"] = expiry
+                self._cache["playlist_token_url"] = playlist_token_url
+                self._cache["m3u8_playlist_src"] = m3u8_playlist_src
 
             except Exception as e:
                 logger.info(f"Error: {e}")
@@ -156,7 +185,7 @@ class StepDaddy:
         try:
             m3u8_playlist_resp = await self._session.get(
                 url=m3u8_playlist_url,
-                headers=self._headers(source_url)
+                headers=self._headers(source_url,source_url)
             )
             if m3u8_playlist_resp.status_code != 200:
                 logger.info(f"m3u8_playlist status code: {
