@@ -41,8 +41,6 @@ class StepDaddy:
         with open("StepDaddyLiveHD/meta.json", "r") as f:
             self._meta = json.load(f)
         self._cache = {}  # To cache server url
-        # Cookies to be set by Flaresolverr first and used by curl_cffi subsequently
-        self._cookies = {}
         self._ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 
     def _headers(self, referer: str = None, origin: str = None):
@@ -67,10 +65,9 @@ class StepDaddy:
         channels = []
         try:
             channels_url = f"{self._base_url}/24-7-channels.php"
-            response = await self._session.post(
+            response = await self._session.get(
                 url=channels_url,
-                headers=self._headers(),
-                cookies=self._cookies
+                headers=self._headers()
             )
             # Logic to update self._base_url if it hase moved to a new domain
             url_from_resp = urlparse(response.url)
@@ -127,10 +124,9 @@ class StepDaddy:
             logger.info("Cache miss!")
             self._cache.clear()
             url = f"{self._base_url}/stream/stream-{channel_id}.php"
-            response = await self._session.post(
+            response = await self._session.get(
                 url=url,
                 headers=self._headers(),
-                cookies=self._cookies,
                 timeout=12
             )
 
