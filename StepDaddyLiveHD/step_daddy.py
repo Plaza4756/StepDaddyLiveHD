@@ -56,9 +56,6 @@ class StepDaddy:
             origin_com = urlparse(origin)
             origin = f"{origin_com.scheme}://{origin_com.netloc}"
             headers["origin"] = origin
-        if ("Windows" in self._ua):
-            headers["sec-ch-ua-platform"] = '"Windows"'
-            headers["sec-ch-ua"] = '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"'
         return headers
 
     async def load_channels(self):
