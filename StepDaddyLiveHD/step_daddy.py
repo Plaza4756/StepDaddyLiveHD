@@ -32,16 +32,16 @@ class StepDaddy:
             count=3, delay=0.5, jitter=0.1, backoff="exponential")
         if socks5 != "":
             self._session = AsyncSession(
-                proxy="socks5://" + socks5, impersonate="chrome150", retry=strategy, allow_redirects="safe")
+                proxy="socks5://" + socks5, impersonate="chrome152", retry=strategy, allow_redirects="safe")
         else:
             self._session = AsyncSession(
-                impersonate="chrome150", retry=strategy, allow_redirects="safe")
+                impersonate="chrome152", retry=strategy, allow_redirects="safe")
         self._base_url = "https://thedaddy.pk"
         self.channels = []
         with open("StepDaddyLiveHD/meta.json", "r") as f:
             self._meta = json.load(f)
         self._cache = {}  # To cache server url
-        self._ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+        self._ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
 
     def _headers(self, referer: str = None, origin: str = None):
         if referer is None:
