@@ -340,6 +340,71 @@ class SlotPlanner:
         return [a for slot in sorted(self._plan) for a in self._plan[slot]]
 
 
+_MEDIA_SEQUENCE = re.compile(r"^#EXT-X-MEDIA-SEQUENCE:\s*(\d+)\s*$", re.M)
+
+
+@dataclass
+class SlotStream:
+    """Keeps one event slot's HLS playlist continuous across source switches.
+
+    When a slot moves to another DLHD channel or event, the upstream media
+    sequence jumps (often backwards). Players track live segments by sequence
+    number, so a backwards jump can stall them. Upstream sequence numbers are
+    shifted so they keep counting up, and the first segment from the new
+    source gets an EXT-X-DISCONTINUITY tag. A backwards jump on the same
+    source (upstream restart) is handled the same way.
+    """
+    source: tuple[str, str] | None = None  # (event key, DLHD channel id)
+    offset: int = 0  # emitted sequence = upstream sequence + offset
+    next_seq: int = 0  # emitted sequence after the last segment handed out
+    discontinuities: int = 0  # switches so far
+    switch_seq: int | None = None  # upstream sequence where the last switch starts
+    last_upstream: int | None = None  # upstream sequence of the previous rewrite
+
+    def rewrite(self, playlist: str, source: tuple[str, str]) -> str:
+        m = _MEDIA_SEQUENCE.search(playlist)
+        if m is None:
+            return playlist
+        upstream = int(m.group(1))
+        lines = playlist.split("\n")
+        count = sum(1 for line in lines if line and not line.startswith("#"))
+        restarted = (source == self.source and self.last_upstream is not None
+                     and upstream < self.last_upstream)
+        self.last_upstream = upstream
+        if source != self.source or restarted:
+            if self.source is not None:
+                self.discontinuities += 1
+                self.switch_seq = upstream
+                self.offset = self.next_seq - upstream
+            self.source = source
+        self.next_seq = max(self.next_seq, upstream + self.offset + count)
+
+        disc_seq, mark = self.discontinuities, None
+        if self.switch_seq is not None:
+            if self.switch_seq < upstream:
+                self.switch_seq = None  # the switch segment has left the window
+            else:
+                disc_seq -= 1
+                if self.switch_seq < upstream + count:
+                    mark = self.switch_seq - upstream  # index of the first new segment
+
+        out, extinf = [], 0
+        for line in lines:
+            if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+                out.append(f"#EXT-X-MEDIA-SEQUENCE:{upstream + self.offset}")
+                if disc_seq:
+                    out.append(f"#EXT-X-DISCONTINUITY-SEQUENCE:{disc_seq}")
+                continue
+            if line.startswith("#EXT-X-DISCONTINUITY-SEQUENCE:"):
+                continue
+            if line.startswith("#EXTINF"):
+                if extinf == mark:
+                    out.append("#EXT-X-DISCONTINUITY")
+                extinf += 1
+            out.append(line)
+        return "\n".join(out)
+
+
 def slots_playlist(api_url: str, settings: EventSettings) -> str:
     data = "#EXTM3U\n"
     for slot in range(1, settings.slots + 1):

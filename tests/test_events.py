@@ -1,3 +1,4 @@
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -5,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from StepDaddyLiveHD.events import (
-    Event, EventChannel, EventSettings, ScheduleParseError, SlotPlanner,
+    Event, EventChannel, EventSettings, ScheduleParseError, SlotPlanner, SlotStream,
     guide_xmltv, legacy_schedule, parse_schedule, slots_playlist,
 )
 
@@ -191,3 +192,52 @@ def test_guide_xmltv():
     assert ("dlhd-10", "20261108040000 +0000", "20261108070000 +0000", "Overlap & co") in progs
     assert ("dlhd-event-01", "20261108030000 +0000", "20261108060000 +0000", spurs) in progs
     assert not any("Boxing" in p[3] for p in progs)  # Upcoming Events excluded
+
+
+# --- slot playlist continuity ----------------------------------------------
+
+def hls(seq, n, tag="a"):
+    body = "".join(f"#EXTINF:6.0,\nhttp://x/{tag}/{seq + i}.ts\n" for i in range(n))
+    return f"#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:{seq}\n{body}"
+
+
+def segs(playlist):
+    seq = int(re.search(r"MEDIA-SEQUENCE:(\d+)", playlist).group(1))
+    disc = re.search(r"DISCONTINUITY-SEQUENCE:(\d+)", playlist)
+    out, marked = [], False
+    for line in playlist.split("\n"):
+        if line == "#EXT-X-DISCONTINUITY":
+            marked = True
+        elif line and not line.startswith("#"):
+            out.append((seq + len(out), line.rsplit("/", 2)[1], marked))
+            marked = False
+    return out, int(disc.group(1)) if disc else 0
+
+
+def test_slot_stream_passthrough_for_first_source():
+    st = SlotStream()
+    assert st.rewrite(hls(500, 3), ("A", "10")) == hls(500, 3)
+    assert st.rewrite(hls(501, 3), ("A", "10")) == hls(501, 3)
+
+
+def test_slot_stream_switch_keeps_counting_and_marks_discontinuity():
+    st = SlotStream()
+    st.rewrite(hls(500, 3), ("A", "10"))  # emitted 500..502
+    out, disc = segs(st.rewrite(hls(20, 3, "b"), ("A", "454")))  # fallback channel, lower sequence
+    assert out == [(503, "b", True), (504, "b", False), (505, "b", False)] and disc == 0
+    out, disc = segs(st.rewrite(hls(21, 3, "b"), ("A", "454")))
+    assert out == [(504, "b", False), (505, "b", False), (506, "b", False)] and disc == 1
+    # a second switch (new event) keeps going from the last segment handed out
+    out, disc = segs(st.rewrite(hls(900, 2, "c"), ("B", "12")))
+    assert out == [(507, "c", True), (508, "c", False)] and disc == 1
+
+
+def test_slot_stream_without_media_sequence_is_unchanged():
+    assert SlotStream().rewrite("#EXTM3U\n", ("A", "1")) == "#EXTM3U\n"
+
+
+def test_slot_stream_restart_on_same_source_keeps_counting():
+    st = SlotStream()
+    st.rewrite(hls(500, 3), ("A", "10"))  # emitted 500..502
+    out, disc = segs(st.rewrite(hls(7, 3), ("A", "10")))  # upstream restarted
+    assert out == [(503, "a", True), (504, "a", False), (505, "a", False)] and disc == 0
