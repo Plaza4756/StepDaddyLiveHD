@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from urllib.parse import urlparse, urljoin, parse_qs
 from curl_cffi.requests import AsyncSession, RetryStrategy
 from typing import List
-from .utils import encrypt, decrypt, urlsafe_base64
+from .utils import encrypt, decrypt, urlsafe_base64, custom_aes_decrypt
 from rxconfig import config
 import html
 import time
@@ -36,7 +36,7 @@ class StepDaddy:
         else:
             self._session = AsyncSession(
                 impersonate="chrome152", retry=strategy, allow_redirects="safe")
-        self._base_url = "https://thedaddy.pk"
+        self._base_url = "https://thedaddy.li"
         self.channels = []
         with open("StepDaddyLiveHD/meta.json", "r") as f:
             self._meta = json.load(f)
@@ -64,8 +64,9 @@ class StepDaddy:
             channels_url = f"{self._base_url}/24-7-channels.php"
             response = await self._session.get(
                 url=channels_url,
-                headers=self._headers()
+                headers=self._headers(),
             )
+            
             # Logic to update self._base_url if it hase moved to a new domain
             url_from_resp = urlparse(response.url)
             extracted_base_url = f"{
@@ -74,6 +75,7 @@ class StepDaddy:
                 logger.info(f"Updated baseUrl: {extracted_base_url}")
                 self._base_url = extracted_base_url
 
+            
             matches = re.findall(
                 r'<a class="card"\s+href="/watch\.php\?id=(\d+)"[^>]*>\s*<div class="card__title">(.*?)</div>',
                 response.text,
@@ -102,21 +104,8 @@ class StepDaddy:
                 m3u8_playlist_url = self._cache["m3u8_playlist_url"]
             else:
                 #refresh playlist-token
-                pt_resp = await self._session.get(
-                    url=self._cache["playlist_token_url"],
-                    headers=self._headers(source_url,source_url),
-                )
-                if pt_resp.status_code != 200:
-                    logger.info(f"Playlist token request failed with code: {pt_resp.status_code}")
-
-                token = pt_resp.json().get("token")
-                ttl = int(pt_resp.json().get("ttl"))
-                m3u8_playlist_url = f"{self._cache["m3u8_playlist_src"]}?t={token}&_={current_ts}"
-                logger.info(f"m3u8 playlist url : {m3u8_playlist_url}")
-                expiry = current_ts + int(ttl*0.5)
-
-                self._cache["m3u8_playlist_url"] = m3u8_playlist_url
-                self._cache["expiry"] = expiry
+                await self.get_m3u8_playlist_token(self._cache["playlist_token_url"], source_url)
+                m3u8_playlist_url = self._cache["m3u8_playlist_url"]
         else:
             logger.info("Cache miss!")
             self._cache.clear()
@@ -126,7 +115,6 @@ class StepDaddy:
                 headers=self._headers(),
                 timeout=12
             )
-
             try:
                 matches = re.compile(
                     "iframe src=\"(.*)\" width").findall(response.text)
@@ -150,31 +138,21 @@ class StepDaddy:
                 edge = re.search(r'const\sEDGE\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
 
                 playlist_token_url = f"{edge}/api/playlist-token?slug={channel_slug}"
+                self._cache["m3u8_playlist_src"] = m3u8_playlist_src
 
                 #get playlist-token
-                pt_resp = await self._session.get(
-                    url=playlist_token_url,
-                    headers=self._headers(source_url,source_url),
-                )
-                if pt_resp.status_code != 200:
-                    logger.info(f"Playlist token request failed with code: {pt_resp.status_code}")
-                token = pt_resp.json().get("token")
-                ttl = int(pt_resp.json().get("ttl"))
-
-                m3u8_playlist_url = f"{m3u8_playlist_src}?t={token}&_={current_ts}"
-                logger.info(f"m3u8 playlist url : {m3u8_playlist_url}")
-                expiry = current_ts + int(ttl*0.5)
-
+                await self.get_m3u8_playlist_token(playlist_token_url, source_url)
+                
                 self._cache["source_url"] = source_url
-                self._cache["m3u8_playlist_url"] = m3u8_playlist_url
+                m3u8_playlist_url = self._cache["m3u8_playlist_url"]
                 self._cache["channel"] = channel_id
-                self._cache["expiry"] = expiry
                 self._cache["playlist_token_url"] = playlist_token_url
                 self._cache["m3u8_playlist_src"] = m3u8_playlist_src
 
             except Exception as e:
                 logger.info(f"Error: {e}")
 
+        aes_key = self._cache["aes_key"]
         try:
             m3u8_playlist_resp = await self._session.get(
                 url=m3u8_playlist_url,
@@ -187,6 +165,7 @@ class StepDaddy:
             logger.info(f"Error: {e}")
 
         m3u8_data = ""
+        sequence = 0
         for line in m3u8_playlist_resp.text.split("\n"):
             if line.startswith('#'):
                 if line.startswith("#EXT-X-KEY:"):
@@ -194,7 +173,13 @@ class StepDaddy:
                     content_key_url = urljoin(m3u8_playlist_url, original_url)
                     line = line.replace(original_url, f"{
                         config.api_url}/key/{encrypt(content_key_url)}/{encrypt(source_url)}")
+                if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+                    sequence = int(line.split(":", 1)[1].strip())
+                    # logger.info(f"sequence: {sequence}")
             elif ((line != '') and (config.proxy_content)):
+                line = custom_aes_decrypt(line, aes_key, sequence)
+                # logger.info(f"decoded segment url: {line}")
+                sequence += 1
                 line = urljoin(m3u8_playlist_url, line)
                 line = f"{
                     config.api_url}/content/{encrypt(line)}/{encrypt(source_url)}"
@@ -211,6 +196,29 @@ class StepDaddy:
         if key_response.status_code != 200:
             raise Exception("Failed to get key")
         return key_response.content
+
+    async def get_m3u8_playlist_token(self, token_url: str, source_url: str):
+        current_ts = int(time.time())
+        #get playlist-token
+        pt_resp = await self._session.get(
+            url=token_url,
+            headers=self._headers(source_url,source_url),
+        )
+        if pt_resp.status_code != 200:
+            logger.info(f"Playlist token request failed with code: {pt_resp.status_code}")
+        token = pt_resp.json().get("token")
+        ttl = int(pt_resp.json().get("ttl"))
+        aes_key = pt_resp.json().get("k")
+        # logger.info(f"aes_key: {aes_key}")
+        m3u8_playlist_src = self._cache["m3u8_playlist_src"]
+        m3u8_playlist_url = f"{m3u8_playlist_src}?t={token}&_={current_ts}"
+        logger.info(f"m3u8 playlist url : {m3u8_playlist_url}")
+        expiry = current_ts + int(ttl*0.5)
+
+        self._cache["m3u8_playlist_url"] = m3u8_playlist_url
+        self._cache["expiry"] = expiry
+        self._cache["aes_key"] = aes_key 
+
 
     @staticmethod
     def content_url(path: str):

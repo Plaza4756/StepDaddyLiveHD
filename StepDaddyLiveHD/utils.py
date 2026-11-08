@@ -2,6 +2,8 @@ import os
 import re
 import base64
 import json
+import struct
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 key_bytes = os.urandom(64)
 
@@ -77,3 +79,16 @@ def decode_bundle(response_text: str) -> dict:
         except Exception:
             continue
     return {}
+
+def b64url_bytes(s: str) -> bytes:
+    s = s.replace("-", "+").replace("_", "/")
+    s += "=" * (-len(s) % 4)
+    return base64.b64decode(s)
+
+def custom_aes_decrypt(line: str, b64key: str, seq: int) -> str:
+    key = b64url_bytes(b64key)
+    sealed = b64url_bytes(line)
+    playlist_iv = struct.pack(">QQ", 0, seq & 0xFFFFFFFFFFFFFFFF)
+    decryptor = Cipher(algorithms.AES(key), modes.CTR(playlist_iv)).decryptor()
+    plaintext = decryptor.update(sealed) + decryptor.finalize()
+    return plaintext.decode("utf-8")
