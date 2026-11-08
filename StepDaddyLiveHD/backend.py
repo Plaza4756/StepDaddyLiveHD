@@ -41,8 +41,8 @@ async def stream(channel_id: str):
         return JSONResponse(content={"error": str(e)}, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-def _blocked_response(e: UpstreamBlocked):
-    return JSONResponse(content={"error": str(e)},
+def _blocked_response(e: UpstreamBlocked, **extra):
+    return JSONResponse(content={"error": str(e), **extra},
                         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                         headers={"Retry-After": str(max(1, int(e.retry_after)))})
 
@@ -632,6 +632,10 @@ async def event_stream(slot: int):
             content = await asyncio.wait_for(step_daddy.stream(channel_id), remaining)
             if not content.startswith("#EXTM3U"):
                 raise Exception("not an m3u8 playlist")
+        except UpstreamBlocked as e:
+            # Not this channel's fault, and the others share the same block.
+            logger.warning("Event slot %d (%s): %s", slot, ev.label, e)
+            return _blocked_response(e, event=ev.label)
         except TimeoutError:
             errors.append(f"{channel_id}: timed out")
             slot_stream.record_failure(channel_id, loop.time())

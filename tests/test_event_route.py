@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from StepDaddyLiveHD import backend  # noqa: E402
 from StepDaddyLiveHD.events import Event, EventChannel, EventSettings, SlotPlanner  # noqa: E402
+from StepDaddyLiveHD.step_daddy import UpstreamBlocked  # noqa: E402
 
 
 def playlist(channel_id, seq=100):
@@ -31,7 +32,7 @@ def env(monkeypatch):
                channels=(EventChannel("10", "A"), EventChannel("11", "B"), EventChannel("12", "C")))
     planner = SlotPlanner(EventSettings(slots=2))
     planner.set_events([ev], now)
-    calls, failing, slow = [], set(), set()
+    calls, failing, slow, blocked = [], set(), set(), set()
 
     async def fake_stream(channel_id):
         calls.append(channel_id)
@@ -39,13 +40,15 @@ def env(monkeypatch):
             await asyncio.sleep(5)
         if channel_id in failing:
             raise Exception("down")
+        if channel_id in blocked:
+            raise UpstreamBlocked(120.5)
         return playlist(channel_id)
 
     monkeypatch.setattr(backend, "slot_planner", planner)
     monkeypatch.setattr(backend, "_slot_streams", {})
     monkeypatch.setattr(backend.step_daddy, "stream", fake_stream)
     return types.SimpleNamespace(client=TestClient(backend.fastapi_app), calls=calls,
-                                 failing=failing, slow=slow)
+                                 failing=failing, slow=slow, blocked=blocked)
 
 
 def test_empty_and_out_of_range_slots_404(env):
@@ -113,3 +116,15 @@ def test_failed_channel_goes_to_the_back(env):
     env.calls.clear()
     r = env.client.get("/event/1.m3u8")  # 11 (last working) fails; 12 before recently failed 10
     assert env.calls == ["11", "12"] and "http://x/12/100.ts" in r.text
+
+
+def test_dlhd_block_stops_fallback_with_503(env):
+    env.blocked.add("10")
+    r = env.client.get("/event/1.m3u8")
+    assert r.status_code == 503 and r.headers["retry-after"] == "120"
+    assert env.calls == ["10"]  # the other channels share the block, so they aren't tried
+    env.blocked.clear()
+    env.calls.clear()
+    env.client.get("/event/1.m3u8")
+    assert env.calls == ["10"]  # not marked as failed: still tried first
+
