@@ -3,7 +3,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from StepDaddyLiveHD.step_daddy import StepDaddy, Channel, UpstreamBlocked
-from StepDaddyLiveHD.events import EventSettings, SlotPlanner, guide_xmltv, slots_playlist
+from StepDaddyLiveHD.events import EventSettings, SlotPlanner, SlotStream, guide_xmltv, slots_playlist
 from rxconfig import config
 from fastapi import Response, status, FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
@@ -596,9 +596,9 @@ def events_playlist():
                     headers={"Content-Disposition": "attachment; filename=events.m3u8"})
 
 
-# slot -> (event key, DLHD channel id) that last streamed, tried first next time
-# so a slot doesn't hop between an event's channels on every playlist refresh.
-_slot_channel: dict[int, tuple[str, str]] = {}
+# slot -> playlist continuity state; its source (event key, DLHD channel id) is
+# tried first next time so a slot doesn't hop between an event's channels.
+_slot_streams: dict[int, SlotStream] = {}
 
 
 @fastapi_app.get("/event/{slot}.m3u8")
@@ -609,7 +609,8 @@ async def event_stream(slot: int):
                             status_code=status.HTTP_404_NOT_FOUND)
     ev = assignment.event
     ids = [c.id for c in ev.channels]
-    last = _slot_channel.get(slot)
+    slot_stream = _slot_streams.setdefault(slot, SlotStream())
+    last = slot_stream.source
     if last and last[0] == ev.key and last[1] in ids:
         ids.remove(last[1])
         ids.insert(0, last[1])
@@ -624,7 +625,7 @@ async def event_stream(slot: int):
             continue
         if last != (ev.key, channel_id):
             logger.info("Event slot %d -> DLHD %s (%s)", slot, channel_id, ev.label)
-        _slot_channel[slot] = (ev.key, channel_id)
+        content = slot_stream.rewrite(content, (ev.key, channel_id))
         return Response(content=content, media_type="application/vnd.apple.mpegurl",
                         headers={"Content-Disposition": f"attachment; filename=event-{slot}.m3u8"})
     logger.warning("Event slot %d (%s): all channels failed: %s", slot, ev.label, errors)

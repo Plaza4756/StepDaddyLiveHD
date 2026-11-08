@@ -41,7 +41,7 @@ def env(monkeypatch):
         return playlist(channel_id)
 
     monkeypatch.setattr(backend, "slot_planner", planner)
-    monkeypatch.setattr(backend, "_slot_channel", {})
+    monkeypatch.setattr(backend, "_slot_streams", {})
     monkeypatch.setattr(backend.step_daddy, "stream", fake_stream)
     return types.SimpleNamespace(client=TestClient(backend.fastapi_app), calls=calls,
                                  failing=failing, slow=slow)
@@ -62,6 +62,13 @@ def test_falls_back_and_prefers_last_working_channel(env):
     env.calls.clear()
     r = env.client.get("/event/1.m3u8")
     assert env.calls == ["11"] and "http://x/11/100.ts" in r.text
+
+
+def test_switch_renumbers_playlist(env):
+    assert "MEDIA-SEQUENCE:100" in env.client.get("/event/1.m3u8").text  # channel 10
+    env.failing.add("10")
+    text = env.client.get("/event/1.m3u8").text  # falls back to 11, same upstream sequence
+    assert "MEDIA-SEQUENCE:101" in text and "#EXT-X-DISCONTINUITY\n" in text
 
 
 def test_all_channels_fail_502(env):
