@@ -353,13 +353,28 @@ class SlotStream:
     shifted so they keep counting up, and the first segment from the new
     source gets an EXT-X-DISCONTINUITY tag. A backwards jump on the same
     source (upstream restart) is handled the same way.
+
+    It also orders an event's channels for the next request: the channel that
+    last worked first, channels that failed recently last.
     """
+    FAILURE_TTL = 300.0  # seconds a failed channel stays at the back
+
     source: tuple[str, str] | None = None  # (event key, DLHD channel id)
     offset: int = 0  # emitted sequence = upstream sequence + offset
     next_seq: int = 0  # emitted sequence after the last segment handed out
     discontinuities: int = 0  # switches so far
     switch_seq: int | None = None  # upstream sequence where the last switch starts
     last_upstream: int | None = None  # upstream sequence of the previous rewrite
+    failed: dict[str, float] = field(default_factory=dict)  # channel id -> failure time
+
+    def order(self, event_key: str, channel_ids: list[str], now: float) -> list[str]:
+        self.failed = {c: t for c, t in self.failed.items() if now - t < self.FAILURE_TTL}
+        preferred = self.source[1] if self.source and self.source[0] == event_key else None
+        return sorted(channel_ids, key=lambda c: (
+            c in self.failed, c != preferred, self.failed.get(c, 0.0)))
+
+    def record_failure(self, channel_id: str, now: float) -> None:
+        self.failed[channel_id] = now
 
     def rewrite(self, playlist: str, source: tuple[str, str]) -> str:
         m = _MEDIA_SEQUENCE.search(playlist)
@@ -371,6 +386,7 @@ class SlotStream:
         restarted = (source == self.source and self.last_upstream is not None
                      and upstream < self.last_upstream)
         self.last_upstream = upstream
+        self.failed.pop(source[1], None)
         if source != self.source or restarted:
             if self.source is not None:
                 self.discontinuities += 1
