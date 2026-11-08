@@ -5,7 +5,7 @@ from urllib.parse import urlparse, urljoin, parse_qs
 from curl_cffi.requests import AsyncSession, RetryStrategy
 from typing import List
 from .utils import encrypt, decrypt, urlsafe_base64, custom_aes_decrypt
-from .events import Event, legacy_schedule, parse_schedule
+from .events import Event, channel_tvg_id, legacy_schedule, parse_schedule
 from rxconfig import config
 import html
 import time
@@ -459,6 +459,8 @@ class StepDaddy:
         for channel in self.channels:
             entry = f" tvg-logo=\"{channel.logo}\",{
                 channel.name}" if channel.logo else f",{channel.name}"
+            # tvg-id matches the channel ids in /epg.xml.
+            entry = f" tvg-id=\"{channel_tvg_id(channel.id)}\"{entry}"
             data += f"#EXTINF:-1{entry}\n{config.api_url}/stream/{channel.id}.m3u8\n"
         return data
 

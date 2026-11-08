@@ -97,6 +97,24 @@ To locally build the container image for developement:
 - **PROXY_CONTENT**: Proxy video content itself through your server (optional). Leave it as TRUE to avoid any CORS errors while fetching the stream.
 - **REFLEX_BACKEND_PORT**: Custom backend port for the server. Useful when running behind vpn (e.g. gluetun) and there is a port conflict. Leave unchanged otherwise.
 
+### Live events
+
+The DLHD schedule (refreshed every 15 minutes) is exposed for IPTV apps:
+
+- **`/epg.xml`**: XMLTV guide. `/playlist.m3u8` entries carry `tvg-id="dlhd-<id>"` matching it, and the event slots below use `dlhd-event-NN`.
+- **`/events.m3u8`**: a fixed list of channels "DLHD Event 01..N" (group `DLHD Events`).
+- **`/event/<n>.m3u8`**: streams whatever event slot *n* carries right now (404 between events). Events take the lowest free slot from 15 minutes before kickoff until kickoff + duration. A slot that is being watched keeps its event for up to 2 hours past that, so overtime isn't cut off. If an event's first channel fails, its other channels are tried.
+
+Environment variables:
+
+- **EVENT_SLOTS**: number of event slots (default `30`).
+- **EVENT_INCLUDE**: regex (case-insensitive) searched in `"<category>: <title>"`; only matching events get slots, e.g. `\b(NBA|NFL|NHL|MLB|NCAA)\b`. Default: all.
+- **EVENT_EXCLUDE**: regex for events left out of slots and the guide (default `^Upcoming Events:`, which lists far-future events under today's date). Set it empty to disable.
+- **EVENT_DURATION_MINUTES**: assumed event length, since DLHD gives no end times (default `180`).
+- **EVENT_LEAD_MINUTES**: how early a slot switches to its next event (default `15`).
+
+Schedule times are labelled "UK GMT" by DLHD and treated as UTC.
+
 ---
 
 ## 🗺️ Site Map
