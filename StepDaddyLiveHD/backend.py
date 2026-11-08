@@ -599,6 +599,9 @@ def events_playlist():
 # slot -> playlist continuity state; its source (event key, DLHD channel id) is
 # tried first next time so a slot doesn't hop between an event's channels.
 _slot_streams: dict[int, SlotStream] = {}
+# Seconds one slot request may spend across all of an event's channels, so a
+# client isn't left waiting while dead channels time out one by one.
+EVENT_STREAM_DEADLINE = 20
 
 
 @fastapi_app.get("/event/{slot}.m3u8")
@@ -611,17 +614,28 @@ async def event_stream(slot: int):
     ids = [c.id for c in ev.channels]
     slot_stream = _slot_streams.setdefault(slot, SlotStream())
     last = slot_stream.source
-    if last and last[0] == ev.key and last[1] in ids:
-        ids.remove(last[1])
-        ids.insert(0, last[1])
+    loop = asyncio.get_running_loop()
+    # A channel that failed or timed out goes to the back for a while, so one
+    # hung channel can't use up the deadline on every refresh.
+    ids = slot_stream.order(ev.key, ids, loop.time())
     errors = []
+    deadline = loop.time() + EVENT_STREAM_DEADLINE
     for channel_id in ids:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            errors.append(f"{channel_id}: skipped, {EVENT_STREAM_DEADLINE}s deadline reached")
+            break
         try:
-            content = await step_daddy.stream(channel_id)
+            content = await asyncio.wait_for(step_daddy.stream(channel_id), remaining)
             if not content.startswith("#EXTM3U"):
                 raise Exception("not an m3u8 playlist")
+        except TimeoutError:
+            errors.append(f"{channel_id}: timed out")
+            slot_stream.record_failure(channel_id, loop.time())
+            continue
         except Exception as e:
             errors.append(f"{channel_id}: {e}")
+            slot_stream.record_failure(channel_id, loop.time())
             continue
         if last != (ev.key, channel_id):
             logger.info("Event slot %d -> DLHD %s (%s)", slot, channel_id, ev.label)

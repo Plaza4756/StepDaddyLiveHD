@@ -241,3 +241,15 @@ def test_slot_stream_restart_on_same_source_keeps_counting():
     st.rewrite(hls(500, 3), ("A", "10"))  # emitted 500..502
     out, disc = segs(st.rewrite(hls(7, 3), ("A", "10")))  # upstream restarted
     assert out == [(503, "a", True), (504, "a", False), (505, "a", False)] and disc == 0
+
+
+def test_slot_stream_channel_order():
+    st = SlotStream()
+    assert st.order("A", ["10", "11", "12"], now=0) == ["10", "11", "12"]
+    st.rewrite(hls(1, 1), ("A", "12"))
+    assert st.order("A", ["10", "11", "12"], now=0) == ["12", "10", "11"]  # last working first
+    assert st.order("B", ["10", "11", "12"], now=0) == ["10", "11", "12"]  # other event: no preference
+    st.record_failure("12", now=1)
+    st.record_failure("10", now=2)
+    assert st.order("A", ["10", "11", "12"], now=3) == ["11", "12", "10"]  # failed last, oldest first
+    assert st.order("A", ["10", "11", "12"], now=400) == ["12", "10", "11"]  # failures expire

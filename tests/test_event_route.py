@@ -1,5 +1,6 @@
-"""/event/<slot>.m3u8 route: slot resolution, channel fallback and preference."""
+"""/event/<slot>.m3u8 route: slot resolution, channel fallback and preference, deadline."""
 import asyncio
+import re
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -78,7 +79,33 @@ def test_all_channels_fail_502(env):
     assert r.json()["details"] == ["10: down", "11: down", "12: down"]
 
 
+def test_deadline_stops_trying_channels(env, monkeypatch):
+    monkeypatch.setattr(backend, "EVENT_STREAM_DEADLINE", 0.2)
+    env.slow.add("10")
+    r = env.client.get("/event/1.m3u8")
+    assert r.status_code == 502
+    details = r.json()["details"]
+    assert details[0] == "10: timed out"
+    assert all(re.match(r"1[12]: skipped", d) for d in details[1:]) and len(details) == 2
+    assert env.calls == ["10"]
+    # the hung channel goes to the back, so the next refresh reaches 11
+    env.calls.clear()
+    r = env.client.get("/event/1.m3u8")
+    assert r.status_code == 200 and "http://x/11/100.ts" in r.text
+    assert env.calls == ["11"]
+
+
 def test_epg_lists_event_slots(env):
     r = env.client.get("/epg.xml")
     assert r.status_code == 200 and '<channel id="dlhd-event-02">' in r.text
     assert 'channel="dlhd-event-01"' in r.text  # the live event's programme
+
+
+def test_failed_channel_goes_to_the_back(env):
+    env.failing.add("10")
+    env.client.get("/event/1.m3u8")  # 10 fails, 11 works
+    env.failing.update({"11"})
+    env.failing.discard("10")
+    env.calls.clear()
+    r = env.client.get("/event/1.m3u8")  # 11 (last working) fails; 12 before recently failed 10
+    assert env.calls == ["11", "12"] and "http://x/12/100.ts" in r.text
