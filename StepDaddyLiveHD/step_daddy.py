@@ -40,6 +40,8 @@ class StepDaddy:
                 impersonate="chrome146", retry=strategy, allow_redirects="safe")
         self._base_url = "https://thedaddy.li"
         self.channels = []
+        self._hide_nsfw = getattr(config, "hide_nsfw", True)
+        self._nsfw_ids = set()  # ids of channels tagged #NSFW seen so far
         with open("StepDaddyLiveHD/meta.json", "r") as f:
             self._meta = json.load(f)
         self._cache = {}  # To cache server url
@@ -93,6 +95,10 @@ class StepDaddy:
                     channel_name.strip()).replace("#", "")
                 meta = self._meta.get(
                     "18+" if channel_name.startswith("18+") else channel_name, {})
+                if "#NSFW" in meta.get("tags", []):
+                    self._nsfw_ids.add(channel_id)
+                    if self._hide_nsfw:
+                        continue
                 logo = meta.get("logo", "")
                 if logo:
                     logo = f"{config.api_url}/logo/{urlsafe_base64(logo)}"
@@ -101,6 +107,9 @@ class StepDaddy:
         finally:
             self.channels = sorted(channels, key=lambda channel: (
                 channel.name.startswith("18"), channel.name))
+
+    def is_hidden(self, channel_id: str) -> bool:
+        return self._hide_nsfw and channel_id in self._nsfw_ids
 
     async def stream(self, channel_id: str):
         current_ts = int(time.time())

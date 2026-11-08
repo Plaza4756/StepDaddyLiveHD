@@ -15,6 +15,7 @@ services:
       - REFLEX_API_URL=${REFLEX_API_URL}
       - PROXY_CONTENT=${PROXY_CONTENT}
       - SOCKS5=${SOCKS5}
+      - HIDE_NSFW=${HIDE_NSFW:-TRUE}
       - REFLEX_BACKEND_PORT=${REFLEX_BACKEND_PORT}
     ports:
       - "${PORT}:${PORT}"
