@@ -19,6 +19,9 @@ step_daddy = StepDaddy()
 logger = logging.getLogger(__name__)
 event_settings = EventSettings.from_env()
 slot_planner = SlotPlanner(event_settings)
+# Room for every event slot plus some direct /stream viewers, so a full set of
+# slots doesn't thrash the token cache.
+step_daddy._cache_size = max(step_daddy._cache_size, event_settings.slots + 8)
 
 
 @fastapi_app.get("/stream/{channel_id}.m3u8")

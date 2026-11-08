@@ -95,6 +95,10 @@ def test_deadline_stops_trying_channels(env, monkeypatch):
     assert env.calls == ["11"]
 
 
+def test_stream_cache_fits_all_slots():
+    assert backend.step_daddy._cache_size >= backend.event_settings.slots
+
+
 def test_epg_lists_event_slots(env):
     r = env.client.get("/epg.xml")
     assert r.status_code == 200 and '<channel id="dlhd-event-02">' in r.text
