@@ -192,7 +192,7 @@ class StepDaddy:
                 sequence += 1
                 line = urljoin(m3u8_playlist_url, line)
                 line = f"{
-                    config.api_url}/content/{encrypt(line)}/{encrypt(source_url)}"
+                    config.api_url}/content/{encrypt(line)}/{encrypt(source_url)}.ts"
             m3u8_data += line + "\n"
         return m3u8_data
 
