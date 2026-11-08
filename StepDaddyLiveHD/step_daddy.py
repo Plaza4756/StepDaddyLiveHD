@@ -42,6 +42,7 @@ class StepDaddy:
         self.channels = []
         self._hide_nsfw = getattr(config, "hide_nsfw", True)
         self._nsfw_ids = set()  # ids of channels tagged #NSFW seen so far
+        self._channels_loaded = False  # True once a channel list has been parsed
         with open("StepDaddyLiveHD/meta.json", "r") as f:
             self._meta = json.load(f)
         self._cache = {}  # To cache server url
@@ -90,13 +91,16 @@ class StepDaddy:
                 response.text,
                 re.DOTALL
             )
+            if not matches:
+                logger.warning("No channels found at %s (status %s); blocked, or the page layout changed",
+                               channels_url, response.status_code)
             for channel_id, channel_name in matches:
                 channel_name = html.unescape(
                     channel_name.strip()).replace("#", "")
                 meta = self._meta.get(
                     "18+" if channel_name.startswith("18+") else channel_name, {})
                 if "#NSFW" in meta.get("tags", []):
-                    self._nsfw_ids.add(channel_id)
+                    self._nsfw_ids.add(str(int(channel_id)))
                     if self._hide_nsfw:
                         continue
                 logo = meta.get("logo", "")
@@ -104,12 +108,23 @@ class StepDaddy:
                     logo = f"{config.api_url}/logo/{urlsafe_base64(logo)}"
                 channels.append(
                     Channel(id=channel_id, name=channel_name, tags=meta.get("tags", []), logo=logo))
+            if matches:
+                self._channels_loaded = True
         finally:
             self.channels = sorted(channels, key=lambda channel: (
                 channel.name.startswith("18"), channel.name))
 
     def is_hidden(self, channel_id: str) -> bool:
-        return self._hide_nsfw and channel_id in self._nsfw_ids
+        if not self._hide_nsfw:
+            return False
+        # Only plain numbers can be checked: padding such as "501?" or "0501" still reaches DLHD as channel 501.
+        if not (channel_id.isascii() and channel_id.isdigit()):
+            return True
+        return str(int(channel_id)) in self._nsfw_ids
+
+    def nsfw_ids_unknown(self) -> bool:
+        """True while hiding is on but no channel list has loaded, so NSFW ids can't be told apart yet."""
+        return self._hide_nsfw and not self._channels_loaded
 
     async def stream(self, channel_id: str):
         current_ts = int(time.time())
