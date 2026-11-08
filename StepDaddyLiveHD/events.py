@@ -1,6 +1,9 @@
-"""DLHD schedule parsing.
+"""DLHD live-event support.
 
-Parses the live-event schedule from the DLHD homepage HTML.
+Parses the schedule from the DLHD homepage HTML, builds an XMLTV guide, and
+assigns events to a fixed set of "event slot" channels so an IPTV app such as
+Dispatcharr gets a stable channel list whose guide shows the game each slot
+is carrying.
 
 Kept free of reflex/rxconfig imports so it can be unit tested on its own.
 """
@@ -8,10 +11,12 @@ from __future__ import annotations
 
 import html
 import logging
+import os
 import re
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Iterable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Iterable, Mapping
+from xml.sax.saxutils import escape, quoteattr
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +24,9 @@ logger = logging.getLogger(__name__)
 # Unverified: whether DLHD shifts to BST (UTC+1) in summer. If it does, this
 # should become ZoneInfo("Europe/London").
 SCHEDULE_TZ = timezone.utc
+
+EVENT_GROUP = "DLHD Events"
+
 
 class ScheduleParseError(Exception):
     pass
@@ -38,6 +46,14 @@ class Event:
     title: str
     start: datetime  # aware, UTC
     channels: tuple[EventChannel, ...]
+
+    @property
+    def key(self) -> str:
+        return f"{self.start.isoformat()}|{self.category}|{self.title}"
+
+    @property
+    def label(self) -> str:
+        return f"{self.category}: {self.title}"
 
 
 # ---------------------------------------------------------------------------
@@ -149,3 +165,246 @@ def legacy_schedule(events: Iterable[Event]) -> dict:
             "channels": [{"channel_name": c.name, "channel_id": c.id} for c in ev.channels],
         })
     return days
+
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+
+def _regex(value: str | None, name: str) -> re.Pattern | None:
+    if not value:
+        return None
+    try:
+        return re.compile(value, re.IGNORECASE)
+    except re.error as e:
+        raise ValueError(f"{name}: invalid regex {value!r}: {e}") from e
+
+
+@dataclass
+class EventSettings:
+    slots: int = 30
+    # Searched (case-insensitive) in "<category>: <title>".
+    include: re.Pattern | None = None
+    # "Upcoming Events" lists far-future events under today's date.
+    exclude: re.Pattern | None = field(default_factory=lambda: re.compile(r"^Upcoming Events:", re.I))
+    duration: timedelta = timedelta(hours=3)  # DLHD gives no end times
+    lead: timedelta = timedelta(minutes=15)  # slot goes live this long before kickoff
+    hold: timedelta = timedelta(minutes=2)  # a slot fetched this recently counts as watched
+    max_overtime: timedelta = timedelta(hours=2)  # how long a watched event may outrun its end
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] = os.environ) -> "EventSettings":
+        s = cls()
+        if env.get("EVENT_SLOTS"):
+            s.slots = int(env["EVENT_SLOTS"])
+            if not 1 <= s.slots <= 999:
+                raise ValueError("EVENT_SLOTS must be between 1 and 999")
+        s.include = _regex(env.get("EVENT_INCLUDE"), "EVENT_INCLUDE")
+        if "EVENT_EXCLUDE" in env:
+            s.exclude = _regex(env["EVENT_EXCLUDE"], "EVENT_EXCLUDE")
+        if env.get("EVENT_DURATION_MINUTES"):
+            s.duration = timedelta(minutes=int(env["EVENT_DURATION_MINUTES"]))
+        if env.get("EVENT_LEAD_MINUTES"):
+            s.lead = timedelta(minutes=int(env["EVENT_LEAD_MINUTES"]))
+        return s
+
+    def in_guide(self, ev: Event) -> bool:
+        return bool(ev.channels) and not (self.exclude and self.exclude.search(ev.label))
+
+    def in_slots(self, ev: Event) -> bool:
+        return self.in_guide(ev) and (self.include is None or bool(self.include.search(ev.label)))
+
+
+# ---------------------------------------------------------------------------
+# Event slots
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Assignment:
+    slot: int
+    event: Event
+    start: datetime  # slot starts serving the event (kickoff - lead)
+    end: datetime  # slot stops serving it (kickoff + duration, or later while watched)
+
+
+def slot_tvg_id(slot: int) -> str:
+    return f"dlhd-event-{slot:02d}"
+
+
+def slot_name(slot: int) -> str:
+    return f"DLHD Event {slot:02d}"
+
+
+class SlotPlanner:
+    """Assigns events to slots 1..N.
+
+    Events are taken in start order and each gets the lowest slot that is free
+    from (kickoff - lead) to (kickoff + duration). On every replan, events that
+    are already live keep their slot, so schedule refreshes don't move them.
+    A slot whose stream was fetched within ``hold`` keeps serving its event
+    past the nominal end (up to ``max_overtime``), so a game in overtime is not
+    switched away mid-watch; the next event planned there moves to another slot.
+    """
+
+    REPLAN_INTERVAL = timedelta(seconds=30)
+
+    def __init__(self, settings: EventSettings):
+        self.settings = settings
+        self._events: list[Event] = []
+        self._plan: dict[int, list[Assignment]] = {}
+        self._serving: dict[int, Assignment] = {}
+        self._last_access: dict[int, datetime] = {}
+        self._planned_at: datetime | None = None
+        self.overflow: list[Event] = []
+
+    def set_events(self, events: Iterable[Event], now: datetime) -> None:
+        self._events = sorted(
+            (e for e in events if self.settings.in_slots(e)),
+            key=lambda e: (e.start, e.category, e.title),
+        )
+        self.replan(now)
+
+    def _watched(self, slot: int, now: datetime) -> bool:
+        last = self._last_access.get(slot)
+        return last is not None and now - last < self.settings.hold
+
+    def _pins(self, now: datetime) -> dict[int, Assignment]:
+        s = self.settings
+        pins: dict[int, Assignment] = {}
+        for slot in range(1, s.slots + 1):
+            serving = self._serving.get(slot)
+            # Cap against the nominal end; serving.end itself grows while held.
+            if (serving and self._watched(slot, now)
+                    and now < serving.event.start + s.duration + s.max_overtime):
+                # Hold runs from the last viewer request, not from this replan
+                # (replans also come from /epg.xml and schedule refreshes).
+                pins[slot] = Assignment(slot, serving.event, serving.start,
+                                        max(serving.end, self._last_access[slot] + s.hold))
+                continue
+            for a in self._plan.get(slot, []):
+                if a.start <= now < a.end:
+                    pins[slot] = a
+                    break
+        return pins
+
+    def replan(self, now: datetime) -> None:
+        s = self.settings
+        pins = self._pins(now)
+        pinned = {a.event.key for a in pins.values()}
+        plan: dict[int, list[Assignment]] = {
+            slot: [pins[slot]] if slot in pins else [] for slot in range(1, s.slots + 1)}
+        busy_until = {slot: (pins[slot].end if slot in pins else None) for slot in plan}
+        overflow: list[Event] = []
+        for ev in self._events:
+            if ev.key in pinned:
+                continue
+            start, end = ev.start - s.lead, ev.start + s.duration
+            if end <= now:
+                continue
+            slot = next((n for n in plan if busy_until[n] is None or busy_until[n] <= start), None)
+            if slot is None:
+                overflow.append(ev)
+                continue
+            plan[slot].append(Assignment(slot, ev, start, end))
+            busy_until[slot] = end
+        self._plan = plan
+        self.overflow = overflow
+        self._planned_at = now
+
+    def _maybe_replan(self, now: datetime) -> None:
+        if self._planned_at is None or now - self._planned_at >= self.REPLAN_INTERVAL:
+            self.replan(now)
+
+    def current(self, slot: int, now: datetime) -> Assignment | None:
+        self._maybe_replan(now)
+        return next((a for a in self._plan.get(slot, []) if a.start <= now < a.end), None)
+
+    def resolve(self, slot: int, now: datetime) -> Assignment | None:
+        """Assignment a viewer of ``slot`` should get now; records the slot as watched."""
+        if not 1 <= slot <= self.settings.slots:
+            return None
+        # Only an unbroken run of requests continues a viewing. After a gap the
+        # slot forgets what it last served, so a finished event can't be re-pinned.
+        if not self._watched(slot, now):
+            self._serving.pop(slot, None)
+        self._last_access[slot] = now
+        a = self.current(slot, now)
+        if a is None:
+            self._serving.pop(slot, None)
+        else:
+            self._serving[slot] = a
+        return a
+
+    def assignments(self, now: datetime) -> list[Assignment]:
+        self._maybe_replan(now)
+        return [a for slot in sorted(self._plan) for a in self._plan[slot]]
+
+
+def slots_playlist(api_url: str, settings: EventSettings) -> str:
+    data = "#EXTM3U\n"
+    for slot in range(1, settings.slots + 1):
+        data += (f'#EXTINF:-1 tvg-id="{slot_tvg_id(slot)}" tvg-name="{slot_name(slot)}" '
+                 f'group-title="{EVENT_GROUP}",{slot_name(slot)}\n'
+                 f"{api_url}/event/{slot}.m3u8\n")
+    return data
+
+
+# ---------------------------------------------------------------------------
+# XMLTV
+# ---------------------------------------------------------------------------
+
+def channel_tvg_id(channel_id: str) -> str:
+    return f"dlhd-{channel_id}"
+
+
+def _xmltv_time(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y%m%d%H%M%S +0000")
+
+
+def _programme(channel: str, start: datetime, stop: datetime, ev: Event) -> str:
+    desc = f"{ev.category}. DLHD: " + ", ".join(f"{c.name} ({c.id})" for c in ev.channels)
+    return (f"  <programme start={quoteattr(_xmltv_time(start))} stop={quoteattr(_xmltv_time(stop))} "
+            f"channel={quoteattr(channel)}>\n"
+            f"    <title>{escape(ev.title)}</title>\n"
+            f"    <desc>{escape(desc)}</desc>\n"
+            f"    <category>{escape(ev.category)}</category>\n"
+            f"  </programme>\n")
+
+
+def guide_xmltv(events: Iterable[Event], channel_names: Mapping[str, str],
+                settings: EventSettings, assignments: Iterable[Assignment]) -> str:
+    """XMLTV for DLHD channel ids ("dlhd-<id>") plus the event slots ("dlhd-event-NN").
+
+    DLHD often lists one channel for several overlapping events, so each
+    channel's programmes are clipped to end where the next one starts.
+    """
+    per_channel: dict[str, list[Event]] = {}
+    names: dict[str, str] = {}
+    for ev in events:
+        if not settings.in_guide(ev):
+            continue
+        for c in ev.channels:
+            per_channel.setdefault(c.id, []).append(ev)
+            names.setdefault(c.id, channel_names.get(c.id) or c.name)
+
+    out = ['<?xml version="1.0" encoding="UTF-8"?>\n',
+           '<tv generator-info-name="StepDaddyLiveHD">\n']
+    for channel_id in sorted(per_channel, key=int):
+        out.append(f"  <channel id={quoteattr(channel_tvg_id(channel_id))}>"
+                   f"<display-name>{escape(names[channel_id])}</display-name></channel>\n")
+    for slot in range(1, settings.slots + 1):
+        out.append(f"  <channel id={quoteattr(slot_tvg_id(slot))}>"
+                   f"<display-name>{escape(slot_name(slot))}</display-name></channel>\n")
+
+    for channel_id in sorted(per_channel, key=int):
+        evs = sorted(per_channel[channel_id], key=lambda e: (e.start, e.title))
+        for i, ev in enumerate(evs):
+            stop = ev.start + settings.duration
+            nxt = next((e.start for e in evs[i + 1:] if e.start > ev.start), None)
+            if nxt is not None and nxt < stop:
+                stop = nxt
+            out.append(_programme(channel_tvg_id(channel_id), ev.start, stop, ev))
+    for a in assignments:
+        out.append(_programme(slot_tvg_id(a.slot), max(a.event.start, a.start), a.end, a.event))
+    out.append("</tv>\n")
+    return "".join(out)
