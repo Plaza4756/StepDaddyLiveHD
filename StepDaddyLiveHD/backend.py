@@ -16,6 +16,8 @@ step_daddy = StepDaddy()
 
 @fastapi_app.get("/stream/{channel_id}.m3u8")
 async def stream(channel_id: str):
+    if step_daddy.is_hidden(channel_id):
+        return JSONResponse(content={"error": "Stream not found"}, status_code=status.HTTP_404_NOT_FOUND)
     try:
         return Response(
             content=await step_daddy.stream(channel_id),
