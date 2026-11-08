@@ -612,6 +612,9 @@ _slot_streams: dict[int, SlotStream] = {}
 # Seconds one slot request may spend across all of an event's channels, so a
 # client isn't left waiting while dead channels time out one by one.
 EVENT_STREAM_DEADLINE = 20
+# A channel that times out with less time than this left was cut short by the
+# deadline, not hung, so it isn't sent to the back.
+EVENT_STREAM_FAIR_SHARE = EVENT_STREAM_DEADLINE / 2
 
 
 @fastapi_app.get("/event/{slot}.m3u8")
@@ -644,6 +647,9 @@ async def event_stream(slot: int):
             logger.warning("Event slot %d (%s): %s", slot, ev.label, e)
             return _blocked_response(e, event=ev.label)
         except TimeoutError:
+            if remaining < EVENT_STREAM_FAIR_SHARE:
+                errors.append(f"{channel_id}: cut short, {EVENT_STREAM_DEADLINE}s deadline reached")
+                break
             errors.append(f"{channel_id}: timed out")
             slot_stream.record_failure(channel_id, loop.time())
             continue

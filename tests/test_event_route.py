@@ -84,6 +84,7 @@ def test_all_channels_fail_502(env):
 
 def test_deadline_stops_trying_channels(env, monkeypatch):
     monkeypatch.setattr(backend, "EVENT_STREAM_DEADLINE", 0.2)
+    monkeypatch.setattr(backend, "EVENT_STREAM_FAIR_SHARE", 0.1)
     env.slow.add("10")
     r = env.client.get("/event/1.m3u8")
     assert r.status_code == 502
@@ -128,3 +129,30 @@ def test_dlhd_block_stops_fallback_with_503(env):
     env.client.get("/event/1.m3u8")
     assert env.calls == ["10"]  # not marked as failed: still tried first
 
+def test_deadline_cut_short_channel_is_not_blamed(env, monkeypatch):
+    # 10 fails slowly, using most of the deadline; 11 is healthy but gets the
+    # rest and times out. Only 10 may go to the back, or 11 would be starved
+    # behind 10 on every refresh.
+    monkeypatch.setattr(backend, "EVENT_STREAM_DEADLINE", 0.4)
+    monkeypatch.setattr(backend, "EVENT_STREAM_FAIR_SHARE", 0.2)
+    real = backend.step_daddy.stream
+    first_11 = [True]
+
+    async def stream(channel_id):
+        if channel_id == "10":
+            env.calls.append(channel_id)
+            await asyncio.sleep(0.3)
+            raise Exception("down")
+        if channel_id == "11" and first_11[0]:
+            first_11[0] = False
+            await asyncio.sleep(5)  # longer than what's left of the deadline
+        return await real(channel_id)
+
+    monkeypatch.setattr(backend.step_daddy, "stream", stream)
+    r = env.client.get("/event/1.m3u8")
+    assert r.status_code == 502
+    assert r.json()["details"] == ["10: down", "11: cut short, 0.4s deadline reached"]
+    env.calls.clear()
+    r = env.client.get("/event/1.m3u8")
+    assert r.status_code == 200 and "http://x/11/100.ts" in r.text
+    assert env.calls == ["11"]  # 11 first now; 10, which really failed, is at the back
