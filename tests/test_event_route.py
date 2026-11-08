@@ -46,6 +46,7 @@ def env(monkeypatch):
 
     monkeypatch.setattr(backend, "slot_planner", planner)
     monkeypatch.setattr(backend, "_slot_streams", {})
+    monkeypatch.setattr(backend, "_slot_fetches", {})
     monkeypatch.setattr(backend.step_daddy, "stream", fake_stream)
     return types.SimpleNamespace(client=TestClient(backend.fastapi_app), calls=calls,
                                  failing=failing, slow=slow, blocked=blocked)
@@ -156,3 +157,122 @@ def test_deadline_cut_short_channel_is_not_blamed(env, monkeypatch):
     r = env.client.get("/event/1.m3u8")
     assert r.status_code == 200 and "http://x/11/100.ts" in r.text
     assert env.calls == ["11"]  # 11 first now; 10, which really failed, is at the back
+def test_concurrent_viewers_share_one_fetch(env, monkeypatch):
+    # Overlapping requests for a slot share the fetch in progress: one upstream
+    # request, one state update, the same playlist for everyone (no stale
+    # result can be applied late, record a late failure, or return a late 502).
+    fetches = []
+
+    async def stream(channel_id):
+        fetches.append(channel_id)
+        await asyncio.sleep(0.2)
+        return playlist(channel_id, 100 + len(fetches))
+
+    monkeypatch.setattr(backend.step_daddy, "stream", stream)
+
+    async def viewers():
+        first = asyncio.create_task(backend.event_stream(1))
+        await asyncio.sleep(0.05)  # the others arrive while the fetch is running
+        rest = [asyncio.create_task(backend.event_stream(1)) for _ in range(2)]
+        return await asyncio.gather(first, *rest)
+
+    responses = asyncio.run(viewers())
+    assert fetches == ["10"]
+    assert {r.status_code for r in responses} == {200}
+    assert len({r.body for r in responses}) == 1
+    assert "DISCONTINUITY" not in responses[0].body.decode()
+
+
+def test_next_request_after_a_fetch_starts_a_new_one(env, monkeypatch):
+    fetches = []
+
+    async def stream(channel_id):
+        fetches.append(channel_id)
+        return playlist(channel_id, 100 + len(fetches))
+
+    monkeypatch.setattr(backend.step_daddy, "stream", stream)
+
+    async def two_refreshes():
+        first = await backend.event_stream(1)
+        return first, await backend.event_stream(1)
+
+    first, second = asyncio.run(two_refreshes())
+    assert fetches == ["10", "10"]
+    assert "MEDIA-SEQUENCE:101" in first.body.decode() and "MEDIA-SEQUENCE:102" in second.body.decode()
+
+
+def test_viewer_disconnect_does_not_cancel_shared_fetch(env, monkeypatch):
+    async def stream(channel_id):
+        await asyncio.sleep(0.2)
+        return playlist(channel_id)
+
+    monkeypatch.setattr(backend.step_daddy, "stream", stream)
+
+    async def one_leaves():
+        leaver = asyncio.create_task(backend.event_stream(1))
+        await asyncio.sleep(0.05)
+        stayer = asyncio.create_task(backend.event_stream(1))
+        await asyncio.sleep(0.05)
+        leaver.cancel()  # client went away
+        return await stayer
+
+    assert asyncio.run(one_leaves()).status_code == 200
+
+
+def test_event_switch_during_fetch_starts_a_new_one(env, monkeypatch):
+    # Slot 1 moves from E1 to E2 while an E1 fetch is running. Viewers of E2
+    # must not wait for (and get) E1; the late E1 fetch must not move the slot
+    # back, and its viewers get E2's playlist.
+    from StepDaddyLiveHD.events import Assignment
+    now = datetime.now(timezone.utc)
+    e1 = backend.slot_planner.current(1, now).event
+    e2 = Event(day="d", category="NFL", time="00:00", title="Next", start=now,
+               channels=(EventChannel("20", "Z"),))
+    current = {"ev": e1}
+    monkeypatch.setattr(backend.slot_planner, "resolve",
+                        lambda slot, when: Assignment(slot, current["ev"], now, now + timedelta(hours=3)))
+    fetches = []
+
+    async def stream(channel_id):
+        fetches.append(channel_id)
+        await asyncio.sleep(0.2 if channel_id == "10" else 0.0)
+        return playlist(channel_id)
+
+    monkeypatch.setattr(backend.step_daddy, "stream", stream)
+
+    async def switch():
+        old = asyncio.create_task(backend.event_stream(1))
+        await asyncio.sleep(0.05)
+        current["ev"] = e2
+        new = await backend.event_stream(1)
+        return await old, new
+
+    old, new = asyncio.run(switch())
+    assert fetches == ["10", "20"]
+    assert "http://x/20/" in new.body.decode() and old.body == new.body
+    assert backend._slot_streams[1].source == (e2.key, "20")
+    assert "DISCONTINUITY" not in new.body.decode()
+
+
+def test_fetch_error_is_logged_and_next_request_retries(env, monkeypatch, caplog):
+    calls = []
+    real_rewrite = backend.SlotStream.rewrite
+
+    def flaky_rewrite(self, playlist_text, source):
+        calls.append(source)
+        if len(calls) == 1:
+            raise RuntimeError("rewrite broke")
+        return real_rewrite(self, playlist_text, source)
+
+    monkeypatch.setattr(backend.SlotStream, "rewrite", flaky_rewrite)
+
+    async def run():
+        with pytest.raises(RuntimeError):
+            await backend.event_stream(1)
+        await asyncio.sleep(0)  # let the done callback run
+        return await backend.event_stream(1)
+
+    with caplog.at_level("ERROR"):
+        r = asyncio.run(run())
+    assert r.status_code == 200 and len(calls) == 2
+    assert any("Event slot fetch failed" in rec.message for rec in caplog.records)

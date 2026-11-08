@@ -609,6 +609,10 @@ def events_playlist():
 # slot -> playlist continuity state; its source (event key, DLHD channel id) is
 # tried first next time so a slot doesn't hop between an event's channels.
 _slot_streams: dict[int, SlotStream] = {}
+# slot -> the fetch in progress for it. Viewers who ask while one is running
+# share its result, so only one fetch at a time updates the slot's state (in
+# order) and DLHD sees one set of requests however many viewers there are.
+_slot_fetches: dict[int, tuple[str, asyncio.Future]] = {}  # slot -> (event key, fetch)
 # Seconds one slot request may spend across all of an event's channels, so a
 # client isn't left waiting while dead channels time out one by one.
 EVENT_STREAM_DEADLINE = 20
@@ -624,6 +628,27 @@ async def event_stream(slot: int):
         return JSONResponse(content={"error": "No event in this slot right now"},
                             status_code=status.HTTP_404_NOT_FOUND)
     ev = assignment.event
+    running = _slot_fetches.get(slot)
+    if running is not None and running[0] == ev.key and not running[1].done():
+        fetch = running[1]
+    else:
+        # Nothing running, or it's for the event the slot just moved away from.
+        fetch = asyncio.ensure_future(_serve_slot(slot, ev))
+        fetch.add_done_callback(_log_fetch_error)
+        _slot_fetches[slot] = (ev.key, fetch)
+    # shield: a viewer who disconnects mustn't cancel the fetch the others wait on.
+    # The same Response object goes to every viewer; Starlette only reads it.
+    return await asyncio.shield(fetch)
+
+
+def _log_fetch_error(fetch: asyncio.Future) -> None:
+    # Viewers who are still waiting get the exception too; this makes sure it is
+    # logged when they have all gone.
+    if not fetch.cancelled() and fetch.exception() is not None:
+        logger.error("Event slot fetch failed", exc_info=fetch.exception())
+
+
+async def _serve_slot(slot: int, ev):
     ids = [c.id for c in ev.channels]
     slot_stream = _slot_streams.setdefault(slot, SlotStream())
     last = slot_stream.source
@@ -657,6 +682,11 @@ async def event_stream(slot: int):
             errors.append(f"{channel_id}: {e}")
             slot_stream.record_failure(channel_id, loop.time())
             continue
+        current = _slot_fetches.get(slot)
+        if current is not None and current[1] is not asyncio.current_task():
+            # The slot moved to another event while this ran: leave its state to
+            # that fetch, and give these viewers what it returns.
+            return await asyncio.shield(current[1])
         if last != (ev.key, channel_id):
             logger.info("Event slot %d -> DLHD %s (%s)", slot, channel_id, ev.label)
         content = slot_stream.rewrite(content, (ev.key, channel_id))
