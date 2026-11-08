@@ -13,7 +13,7 @@ import html
 import logging
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Mapping
 from xml.sax.saxutils import escape, quoteattr
@@ -180,9 +180,13 @@ def _regex(value: str | None, name: str) -> re.Pattern | None:
         raise ValueError(f"{name}: invalid regex {value!r}: {e}") from e
 
 
+MAX_SLOTS = 999
+
+
 @dataclass
 class EventSettings:
-    slots: int = 30
+    # A busy day's schedule needs ~160 slots at its peak (measured 2026-11-08).
+    slots: int = 200
     # Searched (case-insensitive) in "<category>: <title>".
     include: re.Pattern | None = None
     # "Upcoming Events" lists far-future events under today's date.
@@ -197,8 +201,8 @@ class EventSettings:
         s = cls()
         if env.get("EVENT_SLOTS"):
             s.slots = int(env["EVENT_SLOTS"])
-            if not 1 <= s.slots <= 999:
-                raise ValueError("EVENT_SLOTS must be between 1 and 999")
+            if not 1 <= s.slots <= MAX_SLOTS:
+                raise ValueError(f"EVENT_SLOTS must be between 1 and {MAX_SLOTS}")
         s.include = _regex(env.get("EVENT_INCLUDE"), "EVENT_INCLUDE")
         if "EVENT_EXCLUDE" in env:
             s.exclude = _regex(env["EVENT_EXCLUDE"], "EVENT_EXCLUDE")
@@ -419,6 +423,13 @@ class SlotStream:
                 extinf += 1
             out.append(line)
         return "\n".join(out)
+
+
+def slots_needed(events: Iterable[Event], settings: EventSettings, now: datetime) -> int:
+    """Slots that would fit every remaining event (ignoring held overtime), for logging."""
+    planner = SlotPlanner(replace(settings, slots=MAX_SLOTS))
+    planner.set_events(events, now)
+    return max((slot for slot, plan in planner._plan.items() if plan), default=0)
 
 
 def slots_playlist(api_url: str, settings: EventSettings) -> str:

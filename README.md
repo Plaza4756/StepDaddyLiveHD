@@ -107,7 +107,7 @@ The DLHD schedule (refreshed every 15 minutes) is exposed for IPTV apps:
 
 Environment variables:
 
-- **EVENT_SLOTS**: number of event slots (default `30`).
+- **EVENT_SLOTS**: number of event slots (default `200`; a busy day needs about 160). If events don't fit, the log says how many slots would fit them all.
 - **EVENT_INCLUDE**: regex (case-insensitive) searched in `"<category>: <title>"`; only matching events get slots, e.g. `\b(NBA|NFL|NHL|MLB|NCAA)\b`. Default: all.
 - **EVENT_EXCLUDE**: regex for events left out of slots and the guide (default `^Upcoming Events:`, which lists far-future events under today's date). Set it empty to disable.
 - **EVENT_DURATION_MINUTES**: assumed event length, since DLHD gives no end times (default `180`).

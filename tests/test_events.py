@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from StepDaddyLiveHD.events import (
+    slots_needed,
     Event, EventChannel, EventSettings, ScheduleParseError, SlotPlanner, SlotStream,
     guide_xmltv, legacy_schedule, parse_schedule, slots_playlist,
 )
@@ -160,6 +161,22 @@ def test_watched_slot_released_after_max_overtime():
         assert p.resolve(1, t).event.title == "A"
         t += timedelta(seconds=30)
     assert p.resolve(1, at(8, 21, 31)) is None
+
+
+
+def test_slots_needed_counts_peak_overlap():
+    events = [ev("A", at(8, 18)), ev("B", at(8, 19)), ev("C", at(8, 20)), ev("D", at(8, 22))]
+    s = EventSettings(slots=1)
+    p = SlotPlanner(s)
+    p.set_events(events, at(8, 17))
+    assert len(p.overflow) == 2  # B and C overlap A
+    assert slots_needed(events, s, at(8, 17)) == 3  # A, B, C run together; D reuses A's slot
+    assert slots_needed(events, s, at(8, 23)) == 1  # only D is left
+    assert slots_needed([], s, at(8, 17)) == 0
+
+
+def test_default_slots_fit_a_busy_day():
+    assert EventSettings().slots >= 160
 
 
 # --- output ----------------------------------------------------------------
