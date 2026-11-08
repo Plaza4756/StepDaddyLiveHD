@@ -3,7 +3,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from StepDaddyLiveHD.step_daddy import StepDaddy, Channel, UpstreamBlocked
-from StepDaddyLiveHD.events import EventSettings, SlotPlanner, SlotStream, guide_xmltv, slots_playlist
+from StepDaddyLiveHD.events import EventSettings, SlotPlanner, SlotStream, guide_xmltv, slots_needed, slots_playlist
 from rxconfig import config
 from fastapi import Response, status, FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
@@ -570,9 +570,16 @@ async def update_schedule():
     while True:
         try:
             await step_daddy.load_schedule()
-            slot_planner.set_events(step_daddy.events, _now())
-            logger.info("Schedule: %d events, %d did not fit in %d event slots",
-                        len(step_daddy.events), len(slot_planner.overflow), event_settings.slots)
+            now = _now()
+            slot_planner.set_events(step_daddy.events, now)
+            if slot_planner.overflow:
+                logger.warning("Schedule: %d events, %d did not fit in %d event slots; "
+                               "EVENT_SLOTS=%d would fit them all",
+                               len(step_daddy.events), len(slot_planner.overflow), event_settings.slots,
+                               slots_needed(step_daddy.events, event_settings, now))
+            else:
+                logger.info("Schedule: %d events, all fit in %d event slots",
+                            len(step_daddy.events), event_settings.slots)
             delay = 900
         except asyncio.CancelledError:
             raise
