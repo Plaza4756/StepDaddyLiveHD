@@ -248,6 +248,13 @@ class SlotPlanner:
     A slot whose stream was fetched within ``hold`` keeps serving its event
     past the nominal end (up to ``max_overtime``), so a game in overtime is not
     switched away mid-watch; the next event planned there moves to another slot.
+
+    A plan made with no previous plan to pin from (after a restart, also when
+    requests came in before the schedule loaded) pins the live events to the
+    slots they get when planned from the start of the schedule. That
+    matches what a running planner gives them while every event fits and no
+    slot is held, so a restart doesn't move live games. Held overtime is
+    forgotten, though.
     """
 
     REPLAN_INTERVAL = timedelta(seconds=30)
@@ -291,9 +298,25 @@ class SlotPlanner:
                     break
         return pins
 
+    def _restart_pins(self, now: datetime) -> dict[int, Assignment]:
+        """Slots for the live events, as planned from the start of the schedule."""
+        s = self.settings
+        busy_until: dict[int, datetime | None] = {slot: None for slot in range(1, s.slots + 1)}
+        pins: dict[int, Assignment] = {}
+        for ev in self._events:
+            start, end = ev.start - s.lead, ev.start + s.duration
+            slot = next((n for n in busy_until if busy_until[n] is None or busy_until[n] <= start), None)
+            if slot is None:
+                continue
+            busy_until[slot] = end
+            if start <= now < end:
+                pins[slot] = Assignment(slot, ev, start, end)
+        return pins
+
     def replan(self, now: datetime) -> None:
         s = self.settings
-        pins = self._pins(now)
+        # No previous plan (a restart): nothing to pin from, so seed the pins.
+        pins = self._pins(now) if any(self._plan.values()) else self._restart_pins(now)
         pinned = {a.event.key for a in pins.values()}
         plan: dict[int, list[Assignment]] = {
             slot: [pins[slot]] if slot in pins else [] for slot in range(1, s.slots + 1)}

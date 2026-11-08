@@ -175,6 +175,51 @@ def test_slots_needed_counts_peak_overlap():
     assert slots_needed([], s, at(8, 17)) == 0
 
 
+
+def test_restart_keeps_live_events_in_their_slots():
+    # A planner running all day vs. one started fresh at 21:15 (a restart).
+    # W and X have ended by then; Y and Z are live and must keep their slots,
+    # or viewers are switched mid-game and the IPTV app's guide is wrong.
+    events = [ev("W", at(8, 16)), ev("X", at(8, 18)), ev("Y", at(8, 20, 30)), ev("Z", at(8, 21, 5)),
+              ev("F", at(8, 23))]
+    running = planner(slots=4)
+    running.set_events(events, at(8, 15))
+    t = at(8, 15)
+    while t <= at(8, 21, 15):  # replans as the day goes on, pinning events as they go live
+        running.replan(t)
+        t += timedelta(minutes=5)
+    restarted = planner(slots=4)
+    restarted.set_events(events, at(8, 21, 15))
+    slots = lambda p: {a.event.title: a.slot for a in p.assignments(at(8, 21, 15))}
+    assert slots(restarted) == slots(running)
+    assert {"Y", "Z", "F"} <= set(slots(restarted))
+    # Requests (e.g. /epg.xml) can replan before the schedule has loaded.
+    early_request = planner(slots=4)
+    early_request.assignments(at(8, 21, 14))
+    early_request.set_events(events, at(8, 21, 15))
+    assert slots(early_request) == slots(running)
+
+
+def test_overflowed_event_gets_the_slot_once_it_frees_up():
+    # B's window (14:55) overlaps A's (to 15:00) by five minutes, and C's
+    # (17:55) overlaps B's. B must get slot 1 once A is over, not miss its
+    # whole run, including after a restart; C follows once B is over.
+    events = [ev("A", at(8, 12)), ev("B", at(8, 15, 10)), ev("C", at(8, 18, 10))]
+    p = planner(slots=1)
+    p.set_events(events, at(8, 14, 50))
+    assert [e.title for e in p.overflow] == ["B"]  # C still fits after A
+    p.replan(at(8, 15, 1))
+    assert p.current(1, at(8, 15, 1)).event.title == "B"
+    assert [e.title for e in p.overflow] == ["C"]  # now B holds the slot until 18:10
+    p.replan(at(8, 17, 0))
+    assert p.current(1, at(8, 17, 0)).event.title == "B"
+    p.replan(at(8, 18, 11))
+    assert p.current(1, at(8, 18, 11)).event.title == "C"
+    restarted = planner(slots=1)
+    restarted.set_events(events, at(8, 15, 30))
+    assert restarted.current(1, at(8, 15, 30)).event.title == "B"
+
+
 def test_default_slots_fit_a_busy_day():
     assert EventSettings().slots >= 160
 
