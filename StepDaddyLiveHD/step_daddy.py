@@ -136,8 +136,9 @@ class StepDaddy:
                 m3u8_playlist_src = re.search(r'const\sSRC\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
                 channel_slug = re.search(r'const\sCHANNEL\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
                 edge = re.search(r'const\sEDGE\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
+                ticket = re.search(r'const\sTICKET\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
 
-                playlist_token_url = f"{edge}/api/playlist-token?slug={channel_slug}"
+                playlist_token_url = f"{edge}/api/playlist-token?slug={channel_slug}&tk={ticket}"
                 self._cache["m3u8_playlist_src"] = m3u8_playlist_src
 
                 #get playlist-token
