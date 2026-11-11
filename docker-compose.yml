@@ -9,6 +9,7 @@ services:
       - PROXY_CONTENT=${PROXY_CONTENT}
       - SOCKS5=${SOCKS5}
       - REFLEX_BACKEND_PORT=${REFLEX_BACKEND_PORT}
+      - CDP_HOST=${CDP_HOST}
     ports:
       - "${PORT}:${PORT}"
     restart: always
@@ -19,3 +20,13 @@ services:
       test: curl -f http://127.0.0.1:${PORT}/playlist || exit 1
       interval: 60s
       retries: 3
+      
+  cloakbrowser:
+    image: docker.io/cloakhq/cloakbrowser:0.5.11
+    command: cloakserve
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges=true
+    # ports:
+    #   - "127.0.0.1:9222:9222"
+    container_name: cloakbrowser
