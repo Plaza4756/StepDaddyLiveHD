@@ -3,3 +3,4 @@ curl-cffi==0.17.0
 python-dateutil==2.9.0.post0
 fastapi==0.162.0
 cryptography==50.0.2
+playwright==1.59.0
