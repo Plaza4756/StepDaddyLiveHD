@@ -10,6 +10,8 @@ import html
 import time
 import logging
 import base64
+import asyncio
+from playwright.async_api import async_playwright
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,16 +34,17 @@ class StepDaddy:
             count=3, delay=0.5, jitter=0.1, backoff="exponential")
         if socks5 != "":
             self._session = AsyncSession(
-                proxy="socks5://" + socks5, impersonate="chrome152", retry=strategy, allow_redirects="safe")
+                proxy="socks5://" + socks5, impersonate="chrome146", retry=strategy, allow_redirects="safe")
         else:
             self._session = AsyncSession(
-                impersonate="chrome152", retry=strategy, allow_redirects="safe")
+                impersonate="chrome146", retry=strategy, allow_redirects="safe")
         self._base_url = "https://thedaddy.li"
         self.channels = []
         with open("StepDaddyLiveHD/meta.json", "r") as f:
             self._meta = json.load(f)
         self._cache = {}  # To cache server url
-        self._ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+        self._cf_verification_started = 0
+        self._ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 
     def _headers(self, referer: str = None, origin: str = None):
         if referer is None:
@@ -51,11 +54,15 @@ class StepDaddy:
             referer = f"{ref_com.scheme}://{ref_com.netloc}/"
         headers = {
             "referer": referer,
+            "user-agent": self._ua,
         }
         if origin:
             origin_com = urlparse(origin)
             origin = f"{origin_com.scheme}://{origin_com.netloc}"
             headers["origin"] = origin
+        if ("Windows" in self._ua):
+            headers["sec-ch-ua-platform"] = '"Windows"'
+            headers["sec-ch-ua"] = '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"'
         return headers
 
     async def load_channels(self):
@@ -136,19 +143,21 @@ class StepDaddy:
                 m3u8_playlist_src = re.search(r'const\sSRC\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
                 channel_slug = re.search(r'const\sCHANNEL\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
                 edge = re.search(r'const\sEDGE\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
-                ticket = re.search(r'const\sTICKET\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
-
-                playlist_token_url = f"{edge}/api/playlist-token?slug={channel_slug}&tk={ticket}"
+                
+                playlist_token_url_pattern = f"{edge}/api/playlist-token?slug="
                 self._cache["m3u8_playlist_src"] = m3u8_playlist_src
+                
+                if self._cf_verification_started == 0:
+                    nav_task = asyncio.create_task(self.cf_turnstile_pass(url, playlist_token_url_pattern))
+
+                await asyncio.sleep(8)
 
                 #get playlist-token
-                await self.get_m3u8_playlist_token(playlist_token_url, source_url)
+                await self.get_m3u8_playlist_token(self._cache["playlist_token_url"], source_url)
                 
                 self._cache["source_url"] = source_url
                 m3u8_playlist_url = self._cache["m3u8_playlist_url"]
                 self._cache["channel"] = channel_id
-                self._cache["playlist_token_url"] = playlist_token_url
-                self._cache["m3u8_playlist_src"] = m3u8_playlist_src
 
             except Exception as e:
                 logger.info(f"Error: {e}")
@@ -197,6 +206,40 @@ class StepDaddy:
         if key_response.status_code != 200:
             raise Exception("Failed to get key")
         return key_response.content
+
+    async def cf_turnstile_pass(self, url: str, playlist_token_url_pattern: str):
+        try:
+            self._cf_verification_started = 1
+            logger.info("Cloudflare turnstile verification started...")
+            pw = await async_playwright().start()
+            browser = await pw.chromium.connect_over_cdp(f"{config.cdp_host}?fingerprint=12345")
+
+            def handle_response(response):
+                check_url = str(response.url)
+                # logger.info(f"cloakbrowser:{check_url} with code:{response.status}")
+                if ((playlist_token_url_pattern in check_url) and (response.status == 200)):
+                    self._cache["playlist_token_url"] = check_url
+                    logger.info(f"playlist_token_url: {check_url}")
+
+            page = await browser.new_page()
+            page.on("response", handle_response)
+            add_extra_header = {
+                'Referer': f"{self._base_url}/",
+                'Origin': self._base_url
+            }
+            await page.set_extra_http_headers(add_extra_header)
+            await page.goto(
+                url=url,
+                wait_until="domcontentloaded"
+            )
+            await asyncio.sleep(18)
+        except Exception as e:
+            logger.info(f"Error: {e}")
+        finally:
+            await browser.close()
+            await pw.stop()
+            await self._session.post(f"{config.cdp_host}/fingerprint/12345/close")
+            self._cf_verification_started = 0
 
     async def get_m3u8_playlist_token(self, token_url: str, source_url: str):
         current_ts = int(time.time())

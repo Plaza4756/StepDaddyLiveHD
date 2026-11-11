@@ -1,6 +1,7 @@
 # 🎉 Status
 ✅ Working fine. Report any issues.
 
+> ⚠️ **Important:** Latest DLHD backend changes require solving cloudflare turnstile non-interactive challenge before issueing playlist auth ticket. This is achieved using cloakbrowser sidecar container. Make sure to update `.env` and `docker-compose.yml` with latest changes before pulling the new container image.
 ---
 
 # StepDaddyLiveHD 🚀

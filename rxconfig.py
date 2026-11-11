@@ -4,12 +4,14 @@ import os
 
 proxy_content = os.environ.get("PROXY_CONTENT", "TRUE").upper() == "TRUE"
 socks5 = os.environ.get("SOCKS5", "")
+cdp_host = os.environ.get("CDP_HOST", "http://cloakbrowser:9222")
 
 print(f"PROXY_CONTENT: {proxy_content}\nSOCKS5: {socks5}")
 
 config = rx.Config(
     app_name="StepDaddyLiveHD",
     proxy_content=proxy_content,
+    cdp_host = cdp_host,
     telemetry_enabled=False,
     socks5=socks5,
     show_built_with_reflex=False,
