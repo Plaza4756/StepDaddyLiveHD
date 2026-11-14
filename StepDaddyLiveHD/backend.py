@@ -434,6 +434,8 @@ def find_all(data: bytes, needle: bytes):
 @fastapi_app.get("/content/{path}/{host}")
 async def content(path: str, host: str):
     try:
+        # No DLHD back-off check here: segments come from a third-party CDN, not
+        # DLHD's edge, so its errors say nothing about a DLHD block.
         host = step_daddy.content_url(host)
         headers = step_daddy._headers(referer=host)
         
