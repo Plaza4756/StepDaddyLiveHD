@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import sys
+import time
 from urllib.parse import parse_qs, urlparse
 import types
 
@@ -13,7 +14,7 @@ except ImportError:
     sys.modules["rxconfig"] = types.SimpleNamespace(config=types.SimpleNamespace(
         api_url="http://localhost:3535", proxy_content=True, socks5=""))
 
-from StepDaddyLiveHD.step_daddy import StepDaddy  # noqa: E402
+from StepDaddyLiveHD.step_daddy import BLOCK_DEFAULT, BLOCK_MAX, StepDaddy, UpstreamBlocked  # noqa: E402
 from StepDaddyLiveHD import step_daddy as step_daddy_module  # noqa: E402
 
 KEY = base64.urlsafe_b64encode(b"k" * 16).decode().rstrip("=")
@@ -21,8 +22,9 @@ PLAYLIST = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n"
 
 
 class Resp:
-    def __init__(self, status=200, text="", data=None):
+    def __init__(self, status=200, text="", data=None, headers=None):
         self.status_code, self.text, self._data, self.url = status, text, data, ""
+        self.headers = headers or {}
 
     def json(self):
         if self._data is None:
@@ -38,6 +40,8 @@ class FakeSession:
         self.m3u8_raise = set()  # channel ids whose m3u8 request raises
         self.no_iframe = set()  # channel ids whose stream page has no player iframe
         self.page_status = {}  # channel id -> stream page status (outage)
+        self.token_retry_after = None  # Retry-After on a 403 from the token endpoint (IP block)
+        self.m3u8_retry_after = None
         self.ttl = 600
         self.tickets = set()  # tickets DLHD currently accepts
         self.posts = []
@@ -58,6 +62,8 @@ class FakeSession:
         if "/api/playlist-token" in url:
             q = parse_qs(urlparse(url).query)
             cid = q["slug"][0].removeprefix("slug")
+            if self.token_retry_after is not None:
+                return Resp(status=403, text="forbidden", headers={"retry-after": self.token_retry_after})
             if cid in self.token_fail:
                 return Resp(status=403, text="forbidden")
             if q.get("tk", [None])[0] not in self.tickets:  # tickets are per channel
@@ -67,6 +73,8 @@ class FakeSession:
             cid = url.split("/")[3]
             if cid in self.m3u8_raise:
                 raise ConnectionError("boom")
+            if self.m3u8_retry_after is not None:
+                return Resp(status=403, text="forbidden", headers={"retry-after": self.m3u8_retry_after})
             status = self.m3u8_status.get(cid, 200)
             return Resp(status=status, text=PLAYLIST if status == 200 else "nope")
         raise AssertionError(f"unexpected url {url}")
@@ -374,3 +382,90 @@ def test_no_ticket_fails_with_its_cause(sd):
         asyncio.run(sd.stream("1"))
     assert "1" not in sd._cache
     assert asyncio.run(sd.stream("2")).startswith("#EXTM3U")  # other channels unaffected
+
+
+# --- DLHD IP block (403/429 with Retry-After)
+
+
+def test_retry_after_blocks_every_channel_without_contacting_dlhd(sd):
+    sd._session.token_retry_after = "3600"
+    with pytest.raises(UpstreamBlocked) as e:
+        asyncio.run(sd.stream("1"))
+    assert 3590 < e.value.retry_after <= 3600 and "1" not in sd._cache
+    before = len(sd._session.calls)
+    with pytest.raises(UpstreamBlocked):
+        asyncio.run(sd.stream("2"))  # another channel: fails fast
+    assert len(sd._session.calls) == before
+    sd._session.token_retry_after = None
+    sd._blocked_until = 0.0  # block expires
+    assert asyncio.run(sd.stream("2")).startswith("#EXTM3U")
+
+
+def test_403_without_retry_after_stays_per_channel(sd):
+    sd._session.token_fail.add("1")
+    with pytest.raises(Exception) as e:
+        asyncio.run(sd.stream("1"))
+    assert not isinstance(e.value, UpstreamBlocked)
+    assert asyncio.run(sd.stream("2")).startswith("#EXTM3U")
+
+
+def test_blocked_refresh_does_not_rescrape(sd):
+    sd._session.ttl = 0
+    asyncio.run(sd.stream("1"))
+    sd._session.token_retry_after = "60"
+    with pytest.raises(UpstreamBlocked):
+        asyncio.run(sd.stream("1"))
+    assert scrapes(sd, "1") == 1
+
+
+def test_blocked_m3u8_evicts_and_blocks(sd):
+    asyncio.run(sd.stream("1"))
+    sd._session.m3u8_retry_after = "60"
+    with pytest.raises(UpstreamBlocked):
+        asyncio.run(sd.stream("1"))
+    assert "1" not in sd._cache
+    with pytest.raises(UpstreamBlocked):
+        asyncio.run(sd.stream("2"))
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("Wed, 21 Oct 2026 07:28:00 GMT", BLOCK_DEFAULT), ("99999", BLOCK_MAX), ("0", 1)])
+def test_retry_after_bounds(sd, value, expected):
+    sd._session.token_retry_after = value
+    with pytest.raises(UpstreamBlocked) as e:
+        asyncio.run(sd.stream("1"))
+    assert expected - 5 < e.value.retry_after <= expected
+
+
+def test_block_started_while_waiting_for_the_browser(sd):
+    sd.browser.delay = 0.05
+    sd.browser.during = lambda cid: setattr(sd, "_blocked_until", time.monotonic() + 60)
+
+    async def two_channels():
+        return await asyncio.gather(sd.stream("1"), sd.stream("2"), return_exceptions=True)
+
+    first, second = asyncio.run(two_channels())
+    assert isinstance(second, UpstreamBlocked)
+    assert sd.browser.passes == ["1"]  # channel 2 never loaded in the browser
+
+
+@pytest.mark.parametrize("status, retry_after, blocked", [(403, "120", True), (403, None, False)])
+def test_browser_token_failure(sd, status, retry_after, blocked):
+    async def run():
+        found = asyncio.get_running_loop().create_future()
+        url = "https://edge.test/api/playlist-token?slug=slug1&tk=x"
+        sd._on_browser_response(found, BrowserResponse("https://edge.test/other", 200), "https://edge.test", "slug1")
+        assert not found.done()  # unrelated responses are ignored
+        sd._on_browser_response(found, BrowserResponse(url, status, {"retry-after": retry_after} if retry_after else {}),
+                                "https://edge.test", "slug1")
+        with pytest.raises(Exception, match=f"failed with code {status}"):
+            await found
+
+    asyncio.run(run())
+    assert (sd._blocked_until > time.monotonic()) is blocked
+
+
+def test_block_seen_by_the_browser_is_reported_as_one(sd, real_browser_pass):
+    url = "https://edge.test/api/playlist-token?slug=slug1&tk=abc"
+    with pytest.raises(UpstreamBlocked):
+        real_browser_pass(FakePlaywright([BrowserResponse(url, 403, {"retry-after": "120"})]))

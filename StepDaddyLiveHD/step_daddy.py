@@ -27,6 +27,18 @@ class Channel(BaseModel):
     logo: str | None
 
 
+class UpstreamBlocked(Exception):
+    """DLHD is refusing this IP (403/429 with Retry-After) for every channel."""
+
+    def __init__(self, retry_after: float):
+        self.retry_after = retry_after
+        super().__init__(f"DLHD is refusing requests from this IP; retry in {int(retry_after)}s")
+
+
+# Bounds for DLHD's Retry-After, in seconds (an HTTP-date value gets the default).
+BLOCK_DEFAULT = 300
+BLOCK_MAX = 3600
+
 class TicketRejected(Exception):
     """DLHD refused the playlist-token request's Turnstile ticket."""
 
@@ -63,6 +75,10 @@ class StepDaddy:
         # so a failed playlist (e.g. an event channel off air) doesn't cost a
         # new browser pass on every retry. LRU ordered, _cache_size entries.
         self._tickets = {}
+        # time.monotonic() until which DLHD has asked us to stay away. Every
+        # channel shares one edge, so retrying (or trying other channels) only
+        # extends the block.
+        self._blocked_until = 0.0
         self._ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 
     def _headers(self, referer: str = None, origin: str = None):
@@ -121,7 +137,27 @@ class StepDaddy:
             self.channels = sorted(channels, key=lambda channel: (
                 channel.name.startswith("18"), channel.name))
 
+    def _note_block(self, status: int, retry_after: str | None):
+        """Start a block if DLHD answered 403/429 with Retry-After."""
+        if status in (403, 429) and retry_after is not None:
+            try:
+                seconds = min(max(float(retry_after), 1.0), BLOCK_MAX)
+            except ValueError:
+                seconds = BLOCK_DEFAULT
+            self._blocked_until = max(self._blocked_until, time.monotonic() + seconds)
+            logger.warning(f"DLHD returned {status} with Retry-After {retry_after}; "
+                           f"not contacting it for {int(seconds)}s")
+
+    def _check_blocked(self, response=None):
+        """Raise UpstreamBlocked while a block is active, or if response starts one."""
+        if response is not None:
+            self._note_block(response.status_code, response.headers.get("retry-after"))
+        remaining = self._blocked_until - time.monotonic()
+        if remaining > 0:
+            raise UpstreamBlocked(remaining)
+
     async def stream(self, channel_id: str):
+        self._check_blocked()
         current_ts = int(time.time())
         # One cache entry per channel, so concurrent viewers on different
         # channels don't evict each other's tokens.
@@ -137,6 +173,8 @@ class StepDaddy:
                 try:
                     await self.get_m3u8_playlist_token(cache["playlist_token_url"], source_url, cache)
                     m3u8_playlist_url = cache["m3u8_playlist_url"]
+                except UpstreamBlocked:
+                    raise
                 except Exception as e:
                     # A failed refresh (e.g. the ticket expired or DLHD rotated
                     # EDGE) drops the entry and rescrapes below, with a new
@@ -196,6 +234,8 @@ class StepDaddy:
                 while len(self._cache) > self._cache_size:
                     self._cache.pop(next(iter(self._cache)))  # evict least recently used
 
+            except UpstreamBlocked:
+                raise
             except Exception as e:
                 logger.info(f"Error: {e}")
                 raise Exception(f"Stream source scrape failed: {e}") from e
@@ -218,6 +258,7 @@ class StepDaddy:
             # Fail clearly and drop the cache entry so the next request starts
             # fresh.
             self._cache.pop(channel_id, None)
+            self._check_blocked(m3u8_playlist_resp)
             raise Exception(f"Upstream m3u8 playlist status code: {m3u8_playlist_resp.status_code}")
 
         m3u8_data = ""
@@ -319,6 +360,7 @@ class StepDaddy:
 
     async def _browser_ticket(self, page_url: str, edge: str, slug: str) -> str:
         async with self._browser_lock:
+            self._check_blocked()  # a block may have started while waiting for the browser
             return await self._load_in_browser(page_url, edge, slug)
 
     def _on_browser_response(self, found: asyncio.Future, response, edge: str, slug: str):
@@ -327,6 +369,7 @@ class StepDaddy:
         if response.status == 200:
             found.set_result(response.url)
         else:
+            self._note_block(response.status, response.headers.get("retry-after"))
             found.set_exception(Exception(f"Ticketed token request failed with code {response.status}"))
 
     async def _load_in_browser(self, page_url: str, edge: str, slug: str) -> str:
@@ -347,6 +390,10 @@ class StepDaddy:
                 token_url = await found
         except TimeoutError:
             raise Exception(f"No ticketed token request within {TICKET_TIMEOUT}s") from None
+        except Exception:
+            # A block the browser saw (see _on_browser_response) is reported as one.
+            self._check_blocked()
+            raise
         finally:
             if found.done() and not found.cancelled():
                 found.exception()  # retrieved, so asyncio doesn't warn about it
@@ -379,6 +426,7 @@ class StepDaddy:
             timeout=12
         )
         if pt_resp.status_code != 200:
+            self._check_blocked(pt_resp)
             logger.info(f"Playlist token request failed with code: {pt_resp.status_code}")
             if pt_resp.status_code == 403 and '"ticket"' in pt_resp.text:
                 raise TicketRejected(f"Playlist token request failed with code: 403 {pt_resp.text[:80]}")

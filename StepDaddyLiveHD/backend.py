@@ -1,6 +1,6 @@
 import os
 import asyncio
-from StepDaddyLiveHD.step_daddy import StepDaddy, Channel
+from StepDaddyLiveHD.step_daddy import StepDaddy, Channel, UpstreamBlocked
 from fastapi import Response, status, FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from .utils import urlsafe_base64_decode
@@ -25,8 +25,16 @@ async def stream(channel_id: str):
         )
     except IndexError:
         return JSONResponse(content={"error": "Stream not found"}, status_code=status.HTTP_404_NOT_FOUND)
+    except UpstreamBlocked as e:
+        return _blocked_response(e)
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+def _blocked_response(e: UpstreamBlocked):
+    return JSONResponse(content={"error": str(e)},
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        headers={"Retry-After": str(max(1, int(e.retry_after)))})
 
 
 @fastapi_app.get("/key/{url}/{host}")
