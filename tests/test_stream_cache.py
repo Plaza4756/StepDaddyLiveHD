@@ -36,6 +36,8 @@ class FakeSession:
         self.token_fail = set()  # channel ids whose token endpoint fails
         self.m3u8_status = {}  # channel id -> status code
         self.m3u8_raise = set()  # channel ids whose m3u8 request raises
+        self.no_iframe = set()  # channel ids whose stream page has no player iframe
+        self.page_status = {}  # channel id -> stream page status (outage)
         self.ttl = 600
         self.tickets = set()  # tickets DLHD currently accepts
         self.posts = []
@@ -44,6 +46,10 @@ class FakeSession:
         self.calls.append(url)
         if "/stream/stream-" in url:
             cid = url.rsplit("-", 1)[1].split(".")[0]
+            if cid in self.page_status:
+                return Resp(status=self.page_status[cid], text="blocked")
+            if cid in self.no_iframe:
+                return Resp(text="<html>no player here</html>")
             return Resp(text=f'<iframe src="https://src.test/{cid}" width="100%">')
         if url.startswith("https://src.test/"):
             cid = url.rsplit("/", 1)[1]
@@ -77,6 +83,7 @@ class FakeBrowser:
     def __init__(self, session):
         self.session = session
         self.passes = []  # channel ids, in order
+        self.fail = set()  # channel ids for which no ticketed request appears
         self.delay = 0.0
         self.active = self.max_active = 0
         self.during = None  # called while a pass is loading
@@ -90,6 +97,8 @@ class FakeBrowser:
             if self.during:
                 self.during(cid)
             await asyncio.sleep(self.delay)
+            if cid in self.fail:
+                raise Exception("No ticketed token request within 30s")
             ticket = f"ticket-{cid}-{len(self.passes)}"
             self.session.tickets.add(ticket)
             return f"{edge}/api/playlist-token?slug={slug}&tk={ticket}"
@@ -335,3 +344,33 @@ def test_token_url_must_be_for_this_channel():
     assert StepDaddy._is_token_url(ok, edge, "premium31")
     assert not StepDaddy._is_token_url(ok, edge, "premium3")  # not a prefix match
     assert not StepDaddy._is_token_url(ok, "https://other.test", "premium31")
+
+
+def test_missing_iframe_raises_index_error(sd):
+    # backend /stream maps IndexError to 404 "Stream not found"
+    sd._session.no_iframe.add("9")
+    with pytest.raises(IndexError):
+        asyncio.run(sd.stream("9"))
+    assert "9" not in sd._cache
+
+
+def test_failed_token_on_scrape_is_reported(sd):
+    sd._session.token_fail.add("1")
+    with pytest.raises(Exception, match="scrape failed: Playlist token request failed with code: 403"):
+        asyncio.run(sd.stream("1"))
+    assert "1" not in sd._cache
+
+
+def test_stream_page_outage_is_not_reported_as_missing(sd):
+    sd._session.page_status["1"] = 403
+    with pytest.raises(Exception, match="Stream page failed with code 403") as e:
+        asyncio.run(sd.stream("1"))
+    assert not isinstance(e.value, IndexError)
+
+
+def test_no_ticket_fails_with_its_cause(sd):
+    sd.browser.fail.add("1")
+    with pytest.raises(Exception, match="scrape failed: No ticketed token request"):
+        asyncio.run(sd.stream("1"))
+    assert "1" not in sd._cache
+    assert asyncio.run(sd.stream("2")).startswith("#EXTM3U")  # other channels unaffected

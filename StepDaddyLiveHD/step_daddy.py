@@ -162,6 +162,11 @@ class StepDaddy:
                 logger.info("source_url: %s", source_url)
             except Exception as e:
                 logger.info(f"Error: {e}")
+                # Fail here instead of later as KeyError('aes_key'). Only a
+                # normal page without a player means "no such stream" (404).
+                if response.status_code != 200:
+                    raise Exception(f"Stream page failed with code {response.status_code}") from e
+                raise
 
             try:
                 source_headers = self._headers()
@@ -193,6 +198,7 @@ class StepDaddy:
 
             except Exception as e:
                 logger.info(f"Error: {e}")
+                raise Exception(f"Stream source scrape failed: {e}") from e
 
         aes_key = cache["aes_key"]
         try:
@@ -376,6 +382,7 @@ class StepDaddy:
             logger.info(f"Playlist token request failed with code: {pt_resp.status_code}")
             if pt_resp.status_code == 403 and '"ticket"' in pt_resp.text:
                 raise TicketRejected(f"Playlist token request failed with code: 403 {pt_resp.text[:80]}")
+            raise Exception(f"Playlist token request failed with code: {pt_resp.status_code}")
         token = pt_resp.json().get("token")
         ttl = int(pt_resp.json().get("ttl"))
         aes_key = pt_resp.json().get("k")
