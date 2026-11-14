@@ -27,6 +27,30 @@ class Channel(BaseModel):
     logo: str | None
 
 
+class UpstreamBlocked(Exception):
+    """DLHD is refusing this IP (403/429 with Retry-After) for every channel."""
+
+    def __init__(self, retry_after: float):
+        self.retry_after = retry_after
+        super().__init__(f"DLHD is refusing requests from this IP; retry in {int(retry_after)}s")
+
+
+# Bounds for DLHD's Retry-After, in seconds (an HTTP-date value gets the default).
+BLOCK_DEFAULT = 300
+BLOCK_MAX = 3600
+
+class TicketRejected(Exception):
+    """DLHD refused the playlist-token request's Turnstile ticket."""
+
+
+# Seconds a browser pass may take to connect, load the stream page and get a
+# ticketed playlist-token request (measured 6-9 s). Cleanup has its own bound.
+TICKET_TIMEOUT = 30
+BROWSER_CLEANUP_TIMEOUT = 10
+# cloakbrowser fingerprint seed; the same seed gives the same browser identity.
+CDP_FINGERPRINT = "12345"
+
+
 class StepDaddy:
     def __init__(self):
         socks5 = config.socks5
@@ -42,8 +66,19 @@ class StepDaddy:
         self.channels = []
         with open("StepDaddyLiveHD/meta.json", "r") as f:
             self._meta = json.load(f)
-        self._cache = {}  # To cache server url
-        self._cf_verification_started = 0
+        self._cache = {}  # channel_id -> stream token/url cache, LRU ordered
+        self._cache_size = 16
+        # cloakbrowser's free build allows one browser session at a time.
+        self._browser_lock = asyncio.Lock()
+        self._ticket_passes = {}  # stream page url -> browser pass in progress
+        # stream page url -> last ticketed token URL, kept apart from the cache
+        # so a failed playlist (e.g. an event channel off air) doesn't cost a
+        # new browser pass on every retry. LRU ordered, _cache_size entries.
+        self._tickets = {}
+        # time.monotonic() until which DLHD has asked us to stay away. Every
+        # channel shares one edge, so retrying (or trying other channels) only
+        # extends the block.
+        self._blocked_until = 0.0
         self._ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 
     def _headers(self, referer: str = None, origin: str = None):
@@ -102,21 +137,57 @@ class StepDaddy:
             self.channels = sorted(channels, key=lambda channel: (
                 channel.name.startswith("18"), channel.name))
 
-    async def stream(self, channel_id: str):
-        current_ts = int(time.time())
-        if (self._cache.get("channel") == channel_id):
-            source_url = self._cache["source_url"]
+    def _note_block(self, status: int, retry_after: str | None):
+        """Start a block if DLHD answered 403/429 with Retry-After."""
+        if status in (403, 429) and retry_after is not None:
+            try:
+                seconds = min(max(float(retry_after), 1.0), BLOCK_MAX)
+            except ValueError:
+                seconds = BLOCK_DEFAULT
+            self._blocked_until = max(self._blocked_until, time.monotonic() + seconds)
+            logger.warning(f"DLHD returned {status} with Retry-After {retry_after}; "
+                           f"not contacting it for {int(seconds)}s")
 
-            if (current_ts < self._cache.get("expiry")):
-                m3u8_playlist_url = self._cache["m3u8_playlist_url"]
+    def _check_blocked(self, response=None):
+        """Raise UpstreamBlocked while a block is active, or if response starts one."""
+        if response is not None:
+            self._note_block(response.status_code, response.headers.get("retry-after"))
+        remaining = self._blocked_until - time.monotonic()
+        if remaining > 0:
+            raise UpstreamBlocked(remaining)
+
+    async def stream(self, channel_id: str):
+        self._check_blocked()
+        current_ts = int(time.time())
+        # One cache entry per channel, so concurrent viewers on different
+        # channels don't evict each other's tokens.
+        cache = self._cache.get(channel_id)
+        if cache is not None:
+            self._cache[channel_id] = self._cache.pop(channel_id)  # mark most recently used
+            source_url = cache["source_url"]
+
+            if (current_ts < cache.get("expiry")):
+                m3u8_playlist_url = cache["m3u8_playlist_url"]
             else:
                 #refresh playlist-token
-                await self.get_m3u8_playlist_token(self._cache["playlist_token_url"], source_url)
-                m3u8_playlist_url = self._cache["m3u8_playlist_url"]
-        else:
+                try:
+                    await self.get_m3u8_playlist_token(cache["playlist_token_url"], source_url, cache)
+                    m3u8_playlist_url = cache["m3u8_playlist_url"]
+                except UpstreamBlocked:
+                    raise
+                except Exception as e:
+                    # A failed refresh (e.g. the ticket expired or DLHD rotated
+                    # EDGE) drops the entry and rescrapes below, with a new
+                    # ticket, instead of failing until restart.
+                    logger.info(f"Token refresh failed for {channel_id}, rescraping: {e}")
+                    if isinstance(e, TicketRejected):
+                        self._forget_ticket(self._stream_page_url(channel_id), cache["playlist_token_url"])
+                    self._cache.pop(channel_id, None)
+                    cache = None
+        if cache is None:
             logger.info("Cache miss!")
-            self._cache.clear()
-            url = f"{self._base_url}/stream/stream-{channel_id}.php"
+            cache = {}
+            url = self._stream_page_url(channel_id)
             response = await self._session.get(
                 url=url,
                 headers=self._headers(),
@@ -129,6 +200,11 @@ class StepDaddy:
                 logger.info("source_url: %s", source_url)
             except Exception as e:
                 logger.info(f"Error: {e}")
+                # Fail here instead of later as KeyError('aes_key'). Only a
+                # normal page without a player means "no such stream" (404).
+                if response.status_code != 200:
+                    raise Exception(f"Stream page failed with code {response.status_code}") from e
+                raise
 
             try:
                 source_headers = self._headers()
@@ -136,6 +212,7 @@ class StepDaddy:
                 source_resp = await self._session.get(
                     url=source_url,
                     headers=source_headers,
+                    timeout=12
                 )
                 if source_resp.status_code != 200:
                     logger.info(f"{source_url} failed with code {source_resp.status_code}")
@@ -143,36 +220,46 @@ class StepDaddy:
                 m3u8_playlist_src = re.search(r'const\sSRC\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
                 channel_slug = re.search(r'const\sCHANNEL\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
                 edge = re.search(r'const\sEDGE\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
-                
-                playlist_token_url_pattern = f"{edge}/api/playlist-token?slug="
-                self._cache["m3u8_playlist_src"] = m3u8_playlist_src
-                
-                if self._cf_verification_started == 0:
-                    nav_task = asyncio.create_task(self.cf_turnstile_pass(url, playlist_token_url_pattern))
 
-                await asyncio.sleep(8)
-
-                #get playlist-token
-                await self.get_m3u8_playlist_token(self._cache["playlist_token_url"], source_url)
+                cache["m3u8_playlist_src"] = m3u8_playlist_src
+                # DLHD only issues a token for a URL carrying a Cloudflare
+                # Turnstile ticket, which a browser gets by loading the page.
+                playlist_token_url = await self._token_with_ticket(url, edge, channel_slug, source_url, cache)
                 
-                self._cache["source_url"] = source_url
-                m3u8_playlist_url = self._cache["m3u8_playlist_url"]
-                self._cache["channel"] = channel_id
+                cache["source_url"] = source_url
+                m3u8_playlist_url = cache["m3u8_playlist_url"]
+                cache["playlist_token_url"] = playlist_token_url
+                cache["m3u8_playlist_src"] = m3u8_playlist_src
+                self._cache[channel_id] = cache
+                while len(self._cache) > self._cache_size:
+                    self._cache.pop(next(iter(self._cache)))  # evict least recently used
 
+            except UpstreamBlocked:
+                raise
             except Exception as e:
                 logger.info(f"Error: {e}")
+                raise Exception(f"Stream source scrape failed: {e}") from e
 
-        aes_key = self._cache["aes_key"]
+        aes_key = cache["aes_key"]
         try:
             m3u8_playlist_resp = await self._session.get(
                 url=m3u8_playlist_url,
-                headers=self._headers(source_url,source_url)
+                headers=self._headers(source_url,source_url),
+                timeout=12
             )
             if m3u8_playlist_resp.status_code != 200:
                 logger.info(f"m3u8_playlist status code: {
                         m3u8_playlist_resp.status_code}")
         except Exception as e:
             logger.info(f"Error: {e}")
+            self._cache.pop(channel_id, None)
+            raise Exception(f"Upstream m3u8 playlist request failed: {e}") from e
+        if m3u8_playlist_resp.status_code != 200:
+            # Fail clearly and drop the cache entry so the next request starts
+            # fresh.
+            self._cache.pop(channel_id, None)
+            self._check_blocked(m3u8_playlist_resp)
+            raise Exception(f"Upstream m3u8 playlist status code: {m3u8_playlist_resp.status_code}")
 
         m3u8_data = ""
         sequence = 0
@@ -202,66 +289,163 @@ class StepDaddy:
         logger.info(f"Content_Key_Url: {url}")
         key_headers = self._headers(referer=f"{host}")
 
+        # Skip while DLHD is blocking us, but don't start a block from a key
+        # response: the key host isn't necessarily DLHD's edge.
+        self._check_blocked()
         key_response = await self._session.get(url, headers=key_headers)
         if key_response.status_code != 200:
             raise Exception("Failed to get key")
         return key_response.content
 
-    async def cf_turnstile_pass(self, url: str, playlist_token_url_pattern: str):
+    async def _token_with_ticket(self, page_url: str, edge: str, slug: str, source_url: str, cache: dict) -> str:
+        """Get a playlist token into cache; returns the ticketed token URL used.
+
+        A ticket kept from an earlier pass is tried first. If DLHD rejects it,
+        a browser pass gets a new one in the same request; other failures (a
+        slow or failing edge) are raised without spending a browser pass.
+        """
+        kept = self._tickets.get(page_url)
+        if kept is not None and self._is_token_url(kept, edge, slug):
+            try:
+                await self.get_m3u8_playlist_token(kept, source_url, cache)
+                return kept
+            except TicketRejected as e:
+                logger.info(f"Kept ticket for {page_url} was rejected, getting a new one: {e}")
+                self._forget_ticket(page_url, kept)
+        token_url = await self._ticketed_token_url(page_url, edge, slug)
+        await self.get_m3u8_playlist_token(token_url, source_url, cache)
+        return token_url
+
+    def _stream_page_url(self, channel_id: str) -> str:
+        return f"{self._base_url}/stream/stream-{channel_id}.php"
+
+    def _forget_ticket(self, page_url: str, token_url: str):
+        # Only that ticket: another request may already have stored a new one.
+        if self._tickets.get(page_url) == token_url:
+            del self._tickets[page_url]
+
+    async def _ticketed_token_url(self, page_url: str, edge: str, slug: str) -> str:
+        """Playlist-token URL with a Cloudflare Turnstile ticket for this channel.
+
+        A ticket only works for its own channel, but keeps working for token
+        refreshes, so it is fetched once per cache entry. Concurrent requests
+        for the same channel share one browser pass.
+        """
+        task = self._ticket_passes.get(page_url)
+        if task is None or task.done():
+            task = asyncio.ensure_future(self._browser_ticket(page_url, edge, slug))
+            self._ticket_passes[page_url] = task
+
+            def done(t):
+                if self._ticket_passes.get(page_url) is t:
+                    del self._ticket_passes[page_url]
+                if t.cancelled():
+                    return
+                if t.exception() is not None:
+                    logger.info(f"Ticket for {page_url} failed: {t.exception()}")
+                    return
+                # Kept even if every caller gave up waiting, so the pass isn't wasted.
+                self._tickets.pop(page_url, None)
+                self._tickets[page_url] = t.result()
+                while len(self._tickets) > self._cache_size:
+                    self._tickets.pop(next(iter(self._tickets)))
+
+            task.add_done_callback(done)
+        # shield: a caller that gives up (e.g. its client timed out) must not
+        # cancel the pass other callers are waiting on.
+        return await asyncio.shield(task)
+
+    @staticmethod
+    def _is_token_url(url: str, edge: str, slug: str) -> bool:
+        if not url.startswith(f"{edge}/api/playlist-token?"):
+            return False
+        return parse_qs(urlparse(url).query).get("slug") == [slug]
+
+    async def _browser_ticket(self, page_url: str, edge: str, slug: str) -> str:
+        async with self._browser_lock:
+            self._check_blocked()  # a block may have started while waiting for the browser
+            return await self._load_in_browser(page_url, edge, slug)
+
+    def _on_browser_response(self, found: asyncio.Future, response, edge: str, slug: str):
+        if found.done() or not self._is_token_url(response.url, edge, slug):
+            return
+        if response.status == 200:
+            found.set_result(response.url)
+        else:
+            self._note_block(response.status, response.headers.get("retry-after"))
+            found.set_exception(Exception(f"Ticketed token request failed with code {response.status}"))
+
+    async def _load_in_browser(self, page_url: str, edge: str, slug: str) -> str:
+        """Load page_url in cloakbrowser and return the token URL it requests."""
+        found = asyncio.get_running_loop().create_future()
+        logger.info(f"Cloudflare turnstile verification for {page_url}")
+        pw = browser = None
         try:
-            self._cf_verification_started = 1
-            logger.info("Cloudflare turnstile verification started...")
-            pw = await async_playwright().start()
-            browser = await pw.chromium.connect_over_cdp(f"{config.cdp_host}?fingerprint=12345")
-
-            def handle_response(response):
-                check_url = str(response.url)
-                # logger.info(f"cloakbrowser:{check_url} with code:{response.status}")
-                if ((playlist_token_url_pattern in check_url) and (response.status == 200)):
-                    self._cache["playlist_token_url"] = check_url
-                    logger.info(f"playlist_token_url: {check_url}")
-
-            page = await browser.new_page()
-            page.on("response", handle_response)
-            add_extra_header = {
-                'Referer': f"{self._base_url}/",
-                'Origin': self._base_url
-            }
-            await page.set_extra_http_headers(add_extra_header)
-            await page.goto(
-                url=url,
-                wait_until="domcontentloaded"
-            )
-            await asyncio.sleep(18)
-        except Exception as e:
-            logger.info(f"Error: {e}")
+            # One deadline for the whole pass: it holds the browser lock, so a
+            # stalled cloakbrowser must not hold up every other channel.
+            async with asyncio.timeout(TICKET_TIMEOUT):
+                pw = await async_playwright().start()
+                browser = await pw.chromium.connect_over_cdp(f"{config.cdp_host}?fingerprint={CDP_FINGERPRINT}")
+                page = await browser.new_page()
+                page.on("response", lambda r: self._on_browser_response(found, r, edge, slug))
+                await page.set_extra_http_headers({"Referer": f"{self._base_url}/", "Origin": self._base_url})
+                await page.goto(url=page_url, wait_until="domcontentloaded")
+                token_url = await found
+        except TimeoutError:
+            raise Exception(f"No ticketed token request within {TICKET_TIMEOUT}s") from None
+        except Exception:
+            # A block the browser saw (see _on_browser_response) is reported as one.
+            self._check_blocked()
+            raise
         finally:
-            await browser.close()
-            await pw.stop()
-            await self._session.post(f"{config.cdp_host}/fingerprint/12345/close")
-            self._cf_verification_started = 0
+            if found.done() and not found.cancelled():
+                found.exception()  # retrieved, so asyncio doesn't warn about it
+            await self._close_browser(pw, browser)
+        logger.info(f"playlist_token_url: {token_url}")
+        return token_url
 
-    async def get_m3u8_playlist_token(self, token_url: str, source_url: str):
+    async def _close_browser(self, pw, browser):
+        """Best-effort cleanup, bounded so a stalled browser can't hold the lock."""
+        try:
+            async with asyncio.timeout(BROWSER_CLEANUP_TIMEOUT):
+                if browser is not None:
+                    await browser.close()
+                if pw is not None:
+                    await pw.stop()
+        except Exception as e:
+            logger.info(f"Closing the browser failed: {e}")
+        try:
+            close_url = f"{config.cdp_host}/fingerprint/{CDP_FINGERPRINT}/close"
+            await asyncio.wait_for(self._session.post(close_url, timeout=5), 6)
+        except Exception as e:
+            logger.info(f"Closing the browser fingerprint failed: {e}")
+
+    async def get_m3u8_playlist_token(self, token_url: str, source_url: str, cache: dict):
         current_ts = int(time.time())
         #get playlist-token
         pt_resp = await self._session.get(
             url=token_url,
             headers=self._headers(source_url,source_url),
+            timeout=12
         )
         if pt_resp.status_code != 200:
+            self._check_blocked(pt_resp)
             logger.info(f"Playlist token request failed with code: {pt_resp.status_code}")
+            if pt_resp.status_code == 403 and '"ticket"' in pt_resp.text:
+                raise TicketRejected(f"Playlist token request failed with code: 403 {pt_resp.text[:80]}")
+            raise Exception(f"Playlist token request failed with code: {pt_resp.status_code}")
         token = pt_resp.json().get("token")
         ttl = int(pt_resp.json().get("ttl"))
         aes_key = pt_resp.json().get("k")
         # logger.info(f"aes_key: {aes_key}")
-        m3u8_playlist_src = self._cache["m3u8_playlist_src"]
+        m3u8_playlist_src = cache["m3u8_playlist_src"]
         m3u8_playlist_url = f"{m3u8_playlist_src}?t={token}&_={current_ts}"
         logger.info(f"m3u8 playlist url : {m3u8_playlist_url}")
         expiry = current_ts + int(ttl*0.5)
 
-        self._cache["m3u8_playlist_url"] = m3u8_playlist_url
-        self._cache["expiry"] = expiry
-        self._cache["aes_key"] = aes_key 
+        cache["m3u8_playlist_url"] = m3u8_playlist_url
+        cache["expiry"] = expiry
+        cache["aes_key"] = aes_key 
 
 
     @staticmethod
