@@ -1,6 +1,10 @@
 import os
 import asyncio
-from StepDaddyLiveHD.step_daddy import StepDaddy, Channel
+import logging
+from datetime import datetime, timezone
+from StepDaddyLiveHD.step_daddy import StepDaddy, Channel, UpstreamBlocked
+from StepDaddyLiveHD.events import EventSettings, SlotPlanner, SlotStream, guide_xmltv, slots_needed, slots_playlist
+from rxconfig import config
 from fastapi import Response, status, FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from .utils import urlsafe_base64_decode
@@ -12,6 +16,12 @@ import struct
 
 fastapi_app = FastAPI()
 step_daddy = StepDaddy()
+logger = logging.getLogger(__name__)
+event_settings = EventSettings.from_env()
+slot_planner = SlotPlanner(event_settings)
+# Room for every event slot plus some direct /stream viewers, so a full set of
+# slots doesn't thrash the token cache.
+step_daddy._cache_size = max(step_daddy._cache_size, event_settings.slots + 8)
 
 
 @fastapi_app.get("/stream/{channel_id}.m3u8")
@@ -25,8 +35,16 @@ async def stream(channel_id: str):
         )
     except IndexError:
         return JSONResponse(content={"error": "Stream not found"}, status_code=status.HTTP_404_NOT_FOUND)
+    except UpstreamBlocked as e:
+        return _blocked_response(e)
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+def _blocked_response(e: UpstreamBlocked, **extra):
+    return JSONResponse(content={"error": str(e), **extra},
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        headers={"Retry-After": str(max(1, int(e.retry_after)))})
 
 
 @fastapi_app.get("/key/{url}/{host}")
@@ -37,6 +55,8 @@ async def key(url: str, host: str):
             media_type="application/octet-stream",
             headers={"Content-Disposition": "attachment; filename=key"}
         )
+    except UpstreamBlocked as e:
+        return _blocked_response(e)
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -434,6 +454,8 @@ def find_all(data: bytes, needle: bytes):
 @fastapi_app.get("/content/{path}/{host}")
 async def content(path: str, host: str):
     try:
+        # No DLHD back-off check here: segments come from a third-party CDN, not
+        # DLHD's edge, so its errors say nothing about a DLHD block.
         host = step_daddy.content_url(host)
         headers = step_daddy._headers(referer=host)
         
@@ -534,6 +556,146 @@ def playlist():
 
 async def get_schedule():
     return await step_daddy.schedule()
+
+
+# ---------------------------------------------------------------------------
+# DLHD events (guide + event slots). See events.py.
+# ---------------------------------------------------------------------------
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+async def update_schedule():
+    while True:
+        try:
+            await step_daddy.load_schedule()
+            now = _now()
+            slot_planner.set_events(step_daddy.events, now)
+            if slot_planner.overflow:
+                logger.warning("Schedule: %d events, %d did not fit in %d event slots; "
+                               "EVENT_SLOTS=%d would fit them all",
+                               len(step_daddy.events), len(slot_planner.overflow), event_settings.slots,
+                               slots_needed(step_daddy.events, event_settings, now))
+            else:
+                logger.info("Schedule: %d events, all fit in %d event slots",
+                            len(step_daddy.events), event_settings.slots)
+            delay = 900
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("Schedule refresh failed, retrying in 60s: %s", e)
+            delay = 60
+        await asyncio.sleep(delay)
+
+
+@fastapi_app.get("/epg.xml")
+async def epg():  # async: keeps planner access on the event loop, not a threadpool
+    now = _now()
+    return Response(
+        content=guide_xmltv(step_daddy.events, {c.id: c.name for c in step_daddy.channels},
+                            event_settings, slot_planner.assignments(now)),
+        media_type="application/xml",
+    )
+
+
+@fastapi_app.get("/events.m3u8")
+def events_playlist():
+    return Response(content=slots_playlist(config.api_url, event_settings),
+                    media_type="application/vnd.apple.mpegurl",
+                    headers={"Content-Disposition": "attachment; filename=events.m3u8"})
+
+
+# slot -> playlist continuity state; its source (event key, DLHD channel id) is
+# tried first next time so a slot doesn't hop between an event's channels.
+_slot_streams: dict[int, SlotStream] = {}
+# slot -> the fetch in progress for it. Viewers who ask while one is running
+# share its result, so only one fetch at a time updates the slot's state (in
+# order) and DLHD sees one set of requests however many viewers there are.
+_slot_fetches: dict[int, tuple[str, asyncio.Future]] = {}  # slot -> (event key, fetch)
+# Seconds one slot request may spend across all of an event's channels, so a
+# client isn't left waiting while dead channels time out one by one.
+EVENT_STREAM_DEADLINE = 20
+# A channel that times out with less time than this left was cut short by the
+# deadline, not hung, so it isn't sent to the back.
+EVENT_STREAM_FAIR_SHARE = EVENT_STREAM_DEADLINE / 2
+
+
+@fastapi_app.get("/event/{slot}.m3u8")
+async def event_stream(slot: int):
+    assignment = slot_planner.resolve(slot, _now())
+    if assignment is None:
+        return JSONResponse(content={"error": "No event in this slot right now"},
+                            status_code=status.HTTP_404_NOT_FOUND)
+    ev = assignment.event
+    running = _slot_fetches.get(slot)
+    if running is not None and running[0] == ev.key and not running[1].done():
+        fetch = running[1]
+    else:
+        # Nothing running, or it's for the event the slot just moved away from.
+        fetch = asyncio.ensure_future(_serve_slot(slot, ev))
+        fetch.add_done_callback(_log_fetch_error)
+        _slot_fetches[slot] = (ev.key, fetch)
+    # shield: a viewer who disconnects mustn't cancel the fetch the others wait on.
+    # The same Response object goes to every viewer; Starlette only reads it.
+    return await asyncio.shield(fetch)
+
+
+def _log_fetch_error(fetch: asyncio.Future) -> None:
+    # Viewers who are still waiting get the exception too; this makes sure it is
+    # logged when they have all gone.
+    if not fetch.cancelled() and fetch.exception() is not None:
+        logger.error("Event slot fetch failed", exc_info=fetch.exception())
+
+
+async def _serve_slot(slot: int, ev):
+    ids = [c.id for c in ev.channels]
+    slot_stream = _slot_streams.setdefault(slot, SlotStream())
+    last = slot_stream.source
+    loop = asyncio.get_running_loop()
+    # A channel that failed or timed out goes to the back for a while, so one
+    # hung channel can't use up the deadline on every refresh.
+    ids = slot_stream.order(ev.key, ids, loop.time())
+    errors = []
+    deadline = loop.time() + EVENT_STREAM_DEADLINE
+    for channel_id in ids:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            errors.append(f"{channel_id}: skipped, {EVENT_STREAM_DEADLINE}s deadline reached")
+            break
+        try:
+            content = await asyncio.wait_for(step_daddy.stream(channel_id), remaining)
+            if not content.startswith("#EXTM3U"):
+                raise Exception("not an m3u8 playlist")
+        except UpstreamBlocked as e:
+            # Not this channel's fault, and the others share the same block.
+            logger.warning("Event slot %d (%s): %s", slot, ev.label, e)
+            return _blocked_response(e, event=ev.label)
+        except TimeoutError:
+            if remaining < EVENT_STREAM_FAIR_SHARE:
+                errors.append(f"{channel_id}: cut short, {EVENT_STREAM_DEADLINE}s deadline reached")
+                break
+            errors.append(f"{channel_id}: timed out")
+            slot_stream.record_failure(channel_id, loop.time())
+            continue
+        except Exception as e:
+            errors.append(f"{channel_id}: {e}")
+            slot_stream.record_failure(channel_id, loop.time())
+            continue
+        current = _slot_fetches.get(slot)
+        if current is not None and current[1] is not asyncio.current_task():
+            # The slot moved to another event while this ran: leave its state to
+            # that fetch, and give these viewers what it returns.
+            return await asyncio.shield(current[1])
+        if last != (ev.key, channel_id):
+            logger.info("Event slot %d -> DLHD %s (%s)", slot, channel_id, ev.label)
+        content = slot_stream.rewrite(content, (ev.key, channel_id))
+        return Response(content=content, media_type="application/vnd.apple.mpegurl",
+                        headers={"Content-Disposition": f"attachment; filename=event-{slot}.m3u8"})
+    logger.warning("Event slot %d (%s): all channels failed: %s", slot, ev.label, errors)
+    return JSONResponse(content={"error": "All channels for this event failed", "event": ev.label,
+                                 "details": errors},
+                        status_code=status.HTTP_502_BAD_GATEWAY)
 
 
 @fastapi_app.get("/logo/{logo}")
