@@ -16,6 +16,7 @@ except ImportError:
 
 from StepDaddyLiveHD.step_daddy import BLOCK_DEFAULT, BLOCK_MAX, StepDaddy, UpstreamBlocked  # noqa: E402
 from StepDaddyLiveHD import step_daddy as step_daddy_module  # noqa: E402
+from StepDaddyLiveHD.utils import encrypt  # noqa: E402
 
 KEY = base64.urlsafe_b64encode(b"k" * 16).decode().rstrip("=")
 PLAYLIST = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n"
@@ -42,6 +43,7 @@ class FakeSession:
         self.page_status = {}  # channel id -> stream page status (outage)
         self.token_retry_after = None  # Retry-After on a 403 from the token endpoint (IP block)
         self.m3u8_retry_after = None
+        self.key_status = (200, None)  # (status, Retry-After) for content key requests
         self.ttl = 600
         self.tickets = set()  # tickets DLHD currently accepts
         self.posts = []
@@ -77,6 +79,10 @@ class FakeSession:
                 return Resp(status=403, text="forbidden", headers={"retry-after": self.m3u8_retry_after})
             status = self.m3u8_status.get(cid, 200)
             return Resp(status=status, text=PLAYLIST if status == 200 else "nope")
+        if url.startswith("https://key.test/"):
+            status, retry_after = self.key_status
+            return Resp(status=status, text="k" if status == 200 else "slow down",
+                        headers={"retry-after": retry_after} if retry_after else None)
         raise AssertionError(f"unexpected url {url}")
 
 
@@ -469,3 +475,26 @@ def test_block_seen_by_the_browser_is_reported_as_one(sd, real_browser_pass):
     url = "https://edge.test/api/playlist-token?slug=slug1&tk=abc"
     with pytest.raises(UpstreamBlocked):
         real_browser_pass(FakePlaywright([BrowserResponse(url, 403, {"retry-after": "120"})]))
+
+
+def key(sd):
+    return asyncio.run(sd.key(encrypt("https://key.test/k1"), encrypt("https://src.test/1")))
+
+
+def test_key_429_does_not_block_streams(sd):
+    # the key host isn't necessarily DLHD's edge, so its errors don't start a block
+    sd._session.key_status = (429, "120")
+    with pytest.raises(Exception, match="Failed to get key") as e:
+        key(sd)
+    assert not isinstance(e.value, UpstreamBlocked)
+    assert asyncio.run(sd.stream("1")).startswith("#EXTM3U")
+
+
+def test_key_not_requested_while_blocked(sd):
+    sd._session.token_retry_after = "60"
+    with pytest.raises(UpstreamBlocked):
+        asyncio.run(sd.stream("1"))
+    before = len(sd._session.calls)
+    with pytest.raises(UpstreamBlocked):
+        key(sd)
+    assert len(sd._session.calls) == before

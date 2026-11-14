@@ -45,6 +45,8 @@ async def key(url: str, host: str):
             media_type="application/octet-stream",
             headers={"Content-Disposition": "attachment; filename=key"}
         )
+    except UpstreamBlocked as e:
+        return _blocked_response(e)
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 

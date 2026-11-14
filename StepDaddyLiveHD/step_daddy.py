@@ -289,6 +289,9 @@ class StepDaddy:
         logger.info(f"Content_Key_Url: {url}")
         key_headers = self._headers(referer=f"{host}")
 
+        # Skip while DLHD is blocking us, but don't start a block from a key
+        # response: the key host isn't necessarily DLHD's edge.
+        self._check_blocked()
         key_response = await self._session.get(url, headers=key_headers)
         if key_response.status_code != 200:
             raise Exception("Failed to get key")
