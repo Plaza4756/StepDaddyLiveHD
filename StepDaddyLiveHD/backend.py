@@ -8,14 +8,25 @@ from urllib.parse import quote, urlparse
 import random
 import curl_cffi.requests
 import gzip
+import logging
 import struct
+
+logger = logging.getLogger(__name__)
 
 fastapi_app = FastAPI()
 step_daddy = StepDaddy()
 
+CHANNEL_RETRY_SECONDS = 60  # wait before retrying a failed channel list load
+
 
 @fastapi_app.get("/stream/{channel_id}.m3u8")
 async def stream(channel_id: str):
+    if step_daddy.nsfw_ids_unknown():
+        return JSONResponse(content={"error": "Channel list not loaded yet"},
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            headers={"Retry-After": str(CHANNEL_RETRY_SECONDS)})
+    if step_daddy.is_hidden(channel_id):
+        return JSONResponse(content={"error": "Stream not found"}, status_code=status.HTTP_404_NOT_FOUND)
     try:
         return Response(
             content=await step_daddy.stream(channel_id),
@@ -512,9 +523,14 @@ async def update_channels():
     while True:
         try:
             await step_daddy.load_channels()
-            await asyncio.sleep(random.randint(1700, 2000))
+            # A page with no channel cards (e.g. a challenge page) leaves streams gated; retry soon.
+            delay = CHANNEL_RETRY_SECONDS if step_daddy.nsfw_ids_unknown() else random.randint(1700, 2000)
+            await asyncio.sleep(delay)
         except asyncio.CancelledError:
             continue
+        except Exception:
+            logger.exception("Channel list load failed; retrying in %ss", CHANNEL_RETRY_SECONDS)
+            await asyncio.sleep(CHANNEL_RETRY_SECONDS)
 
 
 def get_channels():

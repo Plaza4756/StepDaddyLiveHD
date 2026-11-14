@@ -95,6 +95,7 @@ To locally build the container image for developement:
 - **REFLEX_API_URL**: Set the domain or IP where the server is reachable.
 - **SOCKS5**: Proxy DLHD traffic through a SOCKS5 server if needed.
 - **PROXY_CONTENT**: Proxy video content itself through your server (optional). Leave it as TRUE to avoid any CORS errors while fetching the stream.
+- **HIDE_NSFW**: Hide DLHD's explicit adult (18+) channels from the channel list, search, and `playlist.m3u8`, and refuse their streams. Defaults to TRUE; set it to FALSE to show them.
 - **REFLEX_BACKEND_PORT**: Custom backend port for the server. Useful when running behind vpn (e.g. gluetun) and there is a port conflict. Leave unchanged otherwise.
 
 ---
