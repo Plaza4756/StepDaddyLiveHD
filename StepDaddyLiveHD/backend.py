@@ -1,5 +1,6 @@
 import os
 import asyncio
+import logging
 from StepDaddyLiveHD.step_daddy import StepDaddy, Channel, UpstreamBlocked
 from fastapi import Response, status, FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
@@ -12,6 +13,7 @@ import struct
 
 fastapi_app = FastAPI()
 step_daddy = StepDaddy()
+logger = logging.getLogger(__name__)
 
 
 @fastapi_app.get("/stream/{channel_id}.m3u8")
@@ -546,6 +548,20 @@ def playlist():
 
 async def get_schedule():
     return await step_daddy.schedule()
+
+
+async def update_schedule():
+    while True:
+        try:
+            await step_daddy.load_schedule()
+            logger.info("Schedule: %d events", len(step_daddy.events))
+            delay = 900
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("Schedule refresh failed, retrying in 60s: %s", e)
+            delay = 60
+        await asyncio.sleep(delay)
 
 
 @fastapi_app.get("/logo/{logo}")

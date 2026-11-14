@@ -5,6 +5,7 @@ from urllib.parse import urlparse, urljoin, parse_qs
 from curl_cffi.requests import AsyncSession, RetryStrategy
 from typing import List
 from .utils import encrypt, decrypt, urlsafe_base64, custom_aes_decrypt
+from .events import Event, legacy_schedule, parse_schedule
 from rxconfig import config
 import html
 import time
@@ -64,6 +65,7 @@ class StepDaddy:
                 impersonate="chrome146", retry=strategy, allow_redirects="safe")
         self._base_url = "https://thedaddy.li"
         self.channels = []
+        self.events: List[Event] = []
         with open("StepDaddyLiveHD/meta.json", "r") as f:
             self._meta = json.load(f)
         self._cache = {}  # channel_id -> stream token/url cache, LRU ordered
@@ -460,6 +462,16 @@ class StepDaddy:
             data += f"#EXTINF:-1{entry}\n{config.api_url}/stream/{channel.id}.m3u8\n"
         return data
 
+    async def load_schedule(self):
+        # /schedule/schedule-generated.php now returns 403; the schedule
+        # lives in the homepage HTML instead.
+        response = await self._session.get(
+            url=f"{self._base_url}/", headers=self._headers(), timeout=30)
+        if response.status_code != 200:
+            raise Exception(f"Schedule page failed with code {response.status_code}")
+        self.events = parse_schedule(response.text)
+
     async def schedule(self):
-        response = await self._session.get(f"{self._base_url}/schedule/schedule-generated.php", headers=self._headers())
-        return response.json()
+        if not self.events:
+            await self.load_schedule()
+        return legacy_schedule(self.events)
