@@ -169,6 +169,7 @@ class StepDaddy:
                 source_resp = await self._session.get(
                     url=source_url,
                     headers=source_headers,
+                    timeout=12
                 )
                 if source_resp.status_code != 200:
                     logger.info(f"{source_url} failed with code {source_resp.status_code}")
@@ -197,7 +198,8 @@ class StepDaddy:
         try:
             m3u8_playlist_resp = await self._session.get(
                 url=m3u8_playlist_url,
-                headers=self._headers(source_url,source_url)
+                headers=self._headers(source_url,source_url),
+                timeout=12
             )
             if m3u8_playlist_resp.status_code != 200:
                 logger.info(f"m3u8_playlist status code: {
@@ -368,6 +370,7 @@ class StepDaddy:
         pt_resp = await self._session.get(
             url=token_url,
             headers=self._headers(source_url,source_url),
+            timeout=12
         )
         if pt_resp.status_code != 200:
             logger.info(f"Playlist token request failed with code: {pt_resp.status_code}")
