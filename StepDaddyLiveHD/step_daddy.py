@@ -114,8 +114,10 @@ class StepDaddy:
                 await self.get_m3u8_playlist_token(self._cache["playlist_token_url"], source_url)
                 m3u8_playlist_url = self._cache["m3u8_playlist_url"]
         else:
-            logger.info("Cache miss!")
-            self._cache.clear()
+            # Don't clear the cache if _cf_verification_started flag is still set
+            if (self._cf_verification_started == 0):
+                logger.info("Cache miss!")
+                self._cache.clear()
             url = f"{self._base_url}/stream/stream-{channel_id}.php"
             response = await self._session.get(
                 url=url,
@@ -147,10 +149,13 @@ class StepDaddy:
                 playlist_token_url_pattern = f"{edge}/api/playlist-token?slug="
                 self._cache["m3u8_playlist_src"] = m3u8_playlist_src
                 
-                if self._cf_verification_started == 0:
+                if (self._cf_verification_started == 0) and (self._cache.get("playlist_token_url") == None):
                     nav_task = asyncio.create_task(self.cf_turnstile_pass(url, playlist_token_url_pattern))
 
-                await asyncio.sleep(8)
+                for i in range(14):
+                    if (self._cache.get("playlist_token_url") != None):
+                        break
+                    await asyncio.sleep(1)
 
                 #get playlist-token
                 await self.get_m3u8_playlist_token(self._cache["playlist_token_url"], source_url)
@@ -213,15 +218,47 @@ class StepDaddy:
             logger.info("Cloudflare turnstile verification started...")
             pw = await async_playwright().start()
             browser = await pw.chromium.connect_over_cdp(f"{config.cdp_host}?fingerprint=12345")
+            context = await browser.new_context()
+
+            BLOCKED = ["histats.com",
+                       "llvpn.com",
+                       "site",
+                       "adsco.re",
+                       "xadsmart.com",
+                       "rapidadexchange.com",
+                       "thirstacock.com",
+                       "profitableratecpmnetwork.com",
+                       "usrpubtrck.com",
+                       "ntwkbc21.com",
+                       "jgzhmyaa.com",
+                       "omlbczrgpp.com",
+                       "online",
+                       "jwpltx.com",
+                       "connatix.com",
+                       "33across.com",
+                       "entitlements.jwplayer.com",
+                       "space",
+                       "fxzwuhag.com",
+                       "gstatic.com",
+                       "shop",
+                       "utvjpspowjctw.com",
+                       "website",
+                       "lsfkadmo.com",
+                       "uzlycrnh.com",
+                       "dhmjikiixeq.com"]
+            # Block the domain and all subdomains and paths
+            for domain in BLOCKED:
+                await context.route(f"**://{domain}/**", lambda route: route.abort())
+                await context.route(f"**://*.{domain}/**", lambda route: route.abort())
 
             def handle_response(response):
                 check_url = str(response.url)
-                # logger.info(f"cloakbrowser:{check_url} with code:{response.status}")
+                logger.info(f"cloakbrowser:{check_url} with code:{response.status}")
                 if ((playlist_token_url_pattern in check_url) and (response.status == 200)):
                     self._cache["playlist_token_url"] = check_url
                     logger.info(f"playlist_token_url: {check_url}")
 
-            page = await browser.new_page()
+            page = await context.new_page()
             page.on("response", handle_response)
             add_extra_header = {
                 'Referer': f"{self._base_url}/",
@@ -232,7 +269,10 @@ class StepDaddy:
                 url=url,
                 wait_until="domcontentloaded"
             )
-            await asyncio.sleep(18)
+            for i in range(19):
+                if (self._cache.get("playlist_token_url") != None):
+                    break
+                await asyncio.sleep(1)
         except Exception as e:
             logger.info(f"Error: {e}")
         finally:
@@ -240,6 +280,8 @@ class StepDaddy:
             await pw.stop()
             await self._session.post(f"{config.cdp_host}/fingerprint/12345/close")
             self._cf_verification_started = 0
+            if (self._cache.get("playlist_token_url") == None):
+                logger.info("Cloudflare turnstile verification failed or timed out!")
 
     async def get_m3u8_playlist_token(self, token_url: str, source_url: str):
         current_ts = int(time.time())
