@@ -331,7 +331,8 @@ def unwrap_now(data: bytes) -> bytes:
     return out
 
 
-@fastapi_app.get("/content/{path}/{host}")
+# Segment URLs end in .ts so FFmpeg >= 7.1 (allowed_segment_extensions) accepts them.
+@fastapi_app.get("/content/{path}/{host}.ts")
 async def content(path: str, host: str):
     try:
         host = step_daddy.content_url(host)
