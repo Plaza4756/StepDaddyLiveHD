@@ -9,7 +9,6 @@ from rxconfig import config
 import html
 import time
 import logging
-import base64
 import asyncio
 from playwright.async_api import async_playwright
 
@@ -147,12 +146,13 @@ class StepDaddy:
                 edge = re.search(r'const\sEDGE\s*=\s*"((?:[^"\\]|\\.)*)"', source_resp.text).group(1).replace('\\/', '/')
                 
                 playlist_token_url_pattern = f"{edge}/api/playlist-token?slug="
+
                 self._cache["m3u8_playlist_src"] = m3u8_playlist_src
                 
                 if (self._cf_verification_started == 0) and (self._cache.get("playlist_token_url") == None):
                     nav_task = asyncio.create_task(self.cf_turnstile_pass(url, playlist_token_url_pattern))
 
-                for i in range(14):
+                for i in range(11):
                     if (self._cache.get("playlist_token_url") != None):
                         break
                     await asyncio.sleep(1)
@@ -245,18 +245,17 @@ class StepDaddy:
                        "website",
                        "lsfkadmo.com",
                        "uzlycrnh.com",
-                       "dhmjikiixeq.com"]
+                       "dhmjikiixeq.com",
+                       "zqaeuutwesr.com",
+                       "ctnwuswpxgr.com",
+                       "ftesywpao.com"]
             # Block the domain and all subdomains and paths
             for domain in BLOCKED:
                 await context.route(f"**://{domain}/**", lambda route: route.abort())
                 await context.route(f"**://*.{domain}/**", lambda route: route.abort())
 
             def handle_response(response):
-                check_url = str(response.url)
-                logger.info(f"cloakbrowser:{check_url} with code:{response.status}")
-                if ((playlist_token_url_pattern in check_url) and (response.status == 200)):
-                    self._cache["playlist_token_url"] = check_url
-                    logger.info(f"playlist_token_url: {check_url}")
+                logger.info(f"cloakbrowser:{response.url} with code:{response.status}")
 
             page = await context.new_page()
             page.on("response", handle_response)
@@ -265,14 +264,17 @@ class StepDaddy:
                 'Origin': self._base_url
             }
             await page.set_extra_http_headers(add_extra_header)
-            await page.goto(
-                url=url,
-                wait_until="domcontentloaded"
-            )
-            for i in range(19):
-                if (self._cache.get("playlist_token_url") != None):
-                    break
-                await asyncio.sleep(1)
+
+            pattern = re.compile("^" + re.escape(playlist_token_url_pattern))
+            async with page.expect_response(
+                lambda r: pattern.match(r.url) is not None and r.status == 200,
+                timeout=20000
+            ) as poll_token_url:
+                await page.goto(url)
+            token_found = await poll_token_url.value
+            self._cache["playlist_token_url"] = token_found.url
+            logger.info(f"playlist_token_url: {token_found.url}")
+
         except Exception as e:
             logger.info(f"Error: {e}")
         finally:
