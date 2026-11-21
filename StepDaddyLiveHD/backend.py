@@ -7,8 +7,8 @@ from .utils import urlsafe_base64_decode
 from urllib.parse import quote, urlparse
 import random
 import curl_cffi.requests
-import gzip
-import struct
+import zlib
+from typing import Optional
 
 fastapi_app = FastAPI()
 step_daddy = StepDaddy()
@@ -40,17 +40,38 @@ async def key(url: str, host: str):
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+# --------------------------------------------------------------------------
+# Constants
+# --------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# PNG helpers
-# ---------------------------------------------------------------------------
+# TIKTIKTSGZ - gzip-compressed MPEG-TS follows the marker
+MAGIC_TS_GZ = b"TIKTIKTSGZ"
+# TIKTIKRAW  - raw MPEG-TS follows the marker
+MAGIC_TS_RAW = b"TIKTIKRAW"
+# TIKTIKPX   - marker embedded in decoded PNG pixels
+MAGIC_PIX = b"TIKTIKPX"
+
+TS_SYNC = 0x47          # MPEG-TS sync byte
+TS_PACKET_SIZE = 0xBC  # 188 bytes
+
+
+# --------------------------------------------------------------------------
+# Decompression helpers
+# --------------------------------------------------------------------------
+
+def gunzip(data: bytes) -> bytes:
+    return zlib.decompress(bytes(data), 16 + zlib.MAX_WBITS)
+
+
+def inflate_zlib(data: bytes) -> bytes:
+    return zlib.decompress(bytes(data))
+
 
 def paeth(a: int, b: int, c: int) -> int:
     p = a + b - c
     pa = abs(p - a)
     pb = abs(p - b)
     pc = abs(p - c)
-
     if pa <= pb and pa <= pc:
         return a
     if pb <= pc:
@@ -58,377 +79,256 @@ def paeth(a: int, b: int, c: int) -> int:
     return c
 
 
-def png_rgb(data: bytes):
-    """
-    Decode the subset of PNG used by the original JavaScript:
+# --------------------------------------------------------------------------
+# Container probes
+# --------------------------------------------------------------------------
 
-        - 8-bit
-        - RGB or RGBA
-        - non-interlaced
-
-    Returns RGB bytes or None.
-    """
-    if len(data) < 8 or data[:2] != b"\x89P":
+def webp_exif_ts(data: bytes) -> Optional[bytes]:
+    if len(data) < 0x10:
+        return None
+    if data[0:4] != b"RIFF" or data[8:12] != b"WEBP":
         return None
 
-    offset = 8
-    width = height = 0
-    depth = color_type = interlace = 0
-    idats = []
+    pos = 0x0C
+    while pos + 8 <= len(data):
+        chunk_type = data[pos:pos + 4]
+        chunk_size = int.from_bytes(data[pos + 4:pos + 8], "little")
+        pos += 8
+        if chunk_size < 0 or pos + chunk_size > len(data):
+            return None
+        if chunk_type == b"EXIF":
+            payload = data[pos:pos + chunk_size]
+            # A valid payload starts with the TS sync byte and repeats it 188
+            # bytes later (i.e. the next packet).
+            if len(payload) > TS_PACKET_SIZE \
+                    and payload[0] == TS_SYNC \
+                    and payload[TS_PACKET_SIZE] == TS_SYNC:
+                return payload
+            return None
+        # RIFF chunks are word aligned: pad odd-sized chunks with one byte.
+        pos += chunk_size + (chunk_size & 1)
 
-    while offset + 8 <= len(data):
-        length = struct.unpack_from(">I", data, offset)[0]
+    return None
 
-        if length > len(data) - offset - 12:
+
+def png_iend_ts(data: bytes) -> Optional[bytes]:
+    if len(data) < 0x10 or data[0] != 0x89 or data[1] != 0x50:  # '\\x89P'
+        return None
+
+    pos = 0x08
+    while pos + 8 <= len(data):
+        chunk_len = int.from_bytes(data[pos:pos + 4], "big")
+        if chunk_len > len(data) - pos - 12:
+            return None
+        chunk_type = data[pos + 4:pos + 8]
+        pos += 8 + chunk_len + 4
+        if chunk_type == b"IEND":
+            if pos < len(data) \
+                    and data[pos] == TS_SYNC \
+                    and pos + TS_PACKET_SIZE < len(data) \
+                    and data[pos + TS_PACKET_SIZE] == TS_SYNC:
+                return data[pos:]
             return None
 
-        chunk_type = data[offset + 4:offset + 8]
-        chunk = data[offset + 8:offset + 8 + length]
+    return None
 
+
+# --------------------------------------------------------------------------
+# PNG decoding (pixel steganography path)
+# --------------------------------------------------------------------------
+
+def png_rgb(data: bytes) -> Optional[bytes]:
+    if len(data) < 8 or data[0] != 0x89 or data[1] != 0x50:
+        return None
+
+    width = height = 0
+    bit_depth = colour_type = interlace = 0
+    idat = bytearray()
+
+    pos = 0x08
+    while pos + 8 <= len(data):
+        chunk_len = int.from_bytes(data[pos:pos + 4], "big")
+        if chunk_len > len(data) - pos - 12:
+            return None
+        chunk_type = data[pos + 4:pos + 8]
         if chunk_type == b"IHDR":
-            if len(chunk) < 13:
-                return None
-
-            width, height = struct.unpack_from(">II", chunk, 0)
-            depth = chunk[8]
-            color_type = chunk[9]
+            chunk = data[pos + 8:pos + 8 + chunk_len]
+            width = int.from_bytes(chunk[0:4], "big")
+            height = int.from_bytes(chunk[4:8], "big")
+            bit_depth = chunk[8]
+            colour_type = chunk[9]
             interlace = chunk[12]
-
         elif chunk_type == b"IDAT":
-            idats.append(chunk)
-
+            idat += data[pos + 8:pos + 8 + chunk_len]
         elif chunk_type == b"IEND":
             break
+        pos += 12 + chunk_len
 
-        offset += 12 + length
-
-    # Same restrictions as the original JS.
-    if (
-        not width
-        or not height
-        or depth != 8
-        or interlace
-        or color_type not in (2, 6)
-    ):
+    if not width or not height or bit_depth != 8 or interlace \
+            or (colour_type != 2 and colour_type != 6):
         return None
 
-    try:
-        raw = gzip_or_zlib_decompress(b"".join(idats))
-    except Exception:
-        return None
+    raw = inflate_zlib(bytes(idat))
 
-    bytes_per_pixel = 4 if color_type == 6 else 3
-    stride = width * bytes_per_pixel
+    bpp = 4 if colour_type == 6 else 3
+    stride = width * bpp
+    out = bytearray(width * height * 3)
 
-    rgb = bytearray(width * height * 3)
-
-    src = 0
-    dst = 0
-    previous = bytearray(stride)
+    prev = bytes(stride)      # previously reconstructed scanline
+    off = 0                   # read cursor into `raw`
+    dst = 0                   # write cursor into `out`
 
     for _ in range(height):
-        if src + 1 + stride > len(raw):
+        if off + 1 + stride > len(raw):
             return None
+        ftype = raw[off]
+        line = raw[off + 1:off + 1 + stride]
+        off += 1 + stride
 
-        filter_type = raw[src]
-        src += 1
+        if ftype == 0:                                    # filter: None
+            if colour_type == 2:
+                out[dst:dst + stride] = line
+            else:
+                j = dst
+                for i in range(0, stride, 4):
+                    out[j] = line[i]
+                    out[j + 1] = line[i + 1]
+                    out[j + 2] = line[i + 2]
+                    j += 3
+            dst += width * 3
+            prev = line
+            continue
 
-        row = raw[src:src + stride]
-        src += stride
-
-        reconstructed = bytearray(stride)
-
+        cur = bytearray(stride)
         for i in range(stride):
-            left = (
-                reconstructed[i - bytes_per_pixel]
-                if i >= bytes_per_pixel
-                else 0
-            )
-
-            above = previous[i]
-
-            upper_left = (
-                previous[i - bytes_per_pixel]
-                if i >= bytes_per_pixel
-                else 0
-            )
-
-            value = row[i]
-
-            if filter_type == 1:
-                value += left
-
-            elif filter_type == 2:
-                value += above
-
-            elif filter_type == 3:
-                value += (left + above) >> 1
-
-            elif filter_type == 4:
-                value += paeth(left, above, upper_left)
-
-            elif filter_type != 0:
+            left = cur[i - bpp] if i >= bpp else 0
+            up = prev[i]
+            upleft = prev[i - bpp] if i >= bpp else 0
+            x = line[i]
+            if ftype == 1:        # Sub
+                x += left
+            elif ftype == 2:      # Up
+                x += up
+            elif ftype == 3:      # Average
+                x += (left + up) >> 1
+            elif ftype == 4:      # Paeth
+                x += paeth(left, up, upleft)
+            else:
                 return None
+            cur[i] = x & 0xFF
 
-            reconstructed[i] = value & 0xFF
-
-        if color_type == 2:
-            # RGB
-            rgb[dst:dst + stride] = reconstructed
+        if colour_type == 2:
+            out[dst:dst + stride] = cur
             dst += stride
-
         else:
-            # RGBA -> RGB
             for i in range(0, stride, 4):
-                rgb[dst] = reconstructed[i]
-                rgb[dst + 1] = reconstructed[i + 1]
-                rgb[dst + 2] = reconstructed[i + 2]
+                out[dst] = cur[i]
+                out[dst + 1] = cur[i + 1]
+                out[dst + 2] = cur[i + 2]
                 dst += 3
+        prev = bytes(cur)
 
-        previous = reconstructed
-
-    return bytes(rgb)
-
-
-def inflate_zlib(data: bytes) -> bytes:
-    import zlib
-    return zlib.decompress(data)
+    return bytes(out)
 
 
-def gzip_or_zlib_decompress(data: bytes) -> bytes:
-    """
-    PNG IDAT uses zlib, not gzip.
-    Kept separate from the gzip payload decoder.
-    """
-    return inflate_zlib(data)
+def find_pixel(rgb: Optional[bytes]) -> int:
+    if not rgb or len(rgb) < 0x0C:
+        return -1
+    for i in range(len(rgb) - 7):
+        if rgb[i] != MAGIC_PIX[0]:
+            continue
+        if rgb[i:i + len(MAGIC_PIX)] == MAGIC_PIX:
+            return i
+    return -1
 
 
-# ---------------------------------------------------------------------------
-# WebP EXIF wrapper
-# ---------------------------------------------------------------------------
-
-def webp_exif_ts(data: bytes):
-    """
-    Equivalent to the JS webpExifTS().
-
-    Looks for:
-
-        RIFF .... WEBP
-                     EXIF
-
-    and validates the custom TS signature at byte 0 and byte 188.
-    """
-
-    if len(data) < 16:
-        return None
-
-    if data[:4] != b"RIFF" or data[8:12] != b"WEBP":
-        return None
-
-    offset = 12
-
-    while offset + 8 <= len(data):
-        chunk_type = data[offset:offset + 4]
-        size = struct.unpack_from("<I", data, offset + 4)[0]
-
-        offset += 8
-
-        if offset + size > len(data):
-            return None
-
-        if chunk_type == b"EXIF":
-            payload = data[offset:offset + size]
-
-            if (
-                len(payload) >= 189
-                and payload[0] == 0x47
-                and payload[188] == 0x47
-            ):
-                return payload
-
-            return None
-
-        # RIFF chunks are padded to an even size.
-        offset += size + (size & 1)
-
-    return None
-
-
-# ---------------------------------------------------------------------------
-# PNG IEND wrapper
-# ---------------------------------------------------------------------------
-
-def png_iend_ts(data: bytes):
-    """
-    Equivalent to pngIendTS().
-
-    Looks for MPEG-TS immediately after PNG's IEND chunk.
-    """
-
-    if len(data) < 16:
-        return None
-
-    if data[0] != 0x89 or data[1] != 0x50:
-        return None
-
-    offset = 8
-
-    while offset + 8 <= len(data):
-        length = struct.unpack_from(">I", data, offset)[0]
-
-        if length > len(data) - offset - 12:
-            return None
-
-        chunk_type = data[offset + 4:offset + 8]
-
-        offset += 8 + length + 4
-
-        if chunk_type == b"IEND":
-            if (
-                offset < len(data)
-                and data[offset] == 0x47
-                and offset + 188 < len(data)
-                and data[offset + 188] == 0x47
-            ):
-                return data[offset:]
-
-            return None
-
-    return None
-
-
-# ---------------------------------------------------------------------------
-# PNG pixel-hidden wrapper
-# ---------------------------------------------------------------------------
-
-def unwrap_pixels(data: bytes):
-    """
-    Equivalent to the original unwrapPixels().
-
-    The decoded RGB data starts with:
-
-        TIKTIKPX
-        <4-byte big-endian gzip length>
-        <gzip data>
-    """
-
+def unwrap_pixels(data: bytes) -> Optional[bytes]:
     rgb = png_rgb(data)
-
-    if not rgb or len(rgb) < 12:
+    idx = find_pixel(rgb)
+    if rgb is None or idx < 0 or idx + 12 > len(rgb):
         return None
 
-    if rgb[:8] != b"TIKTIKPX":
+    size = int.from_bytes(rgb[idx + 8:idx + 12], "big")
+    if size <= 0 or idx + 12 + size > len(rgb):
         return None
 
-    size = struct.unpack_from(">I", rgb, 8)[0]
-
-    if size <= 0 or 12 + size > len(rgb):
-        return None
-
-    gz = rgb[12:12 + size]
-
-    if len(gz) < 2 or gz[:2] != b"\x1f\x8b":
+    blob = rgb[idx + 12:idx + 12 + size]
+    if len(blob) < 2 or blob[0] != 0x1F or blob[1] != 0x8B:
         return None
 
     try:
-        ts = gzip.decompress(gz)
-    except Exception:
+        out = gunzip(blob)
+    except zlib.error:
         return None
 
-    if not ts or ts[0] != 0x47:
+    if not out or out[0] != TS_SYNC:
         return None
+    return out
 
-    return ts
 
+# --------------------------------------------------------------------------
+# Top level segment unwrapping
+# --------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Main decoder
-# ---------------------------------------------------------------------------
+def unwrap_segment(data: bytes) -> bytes:
+    data = bytes(data)
 
-def unwrap_ts(data: bytes) -> bytes:
-    """
-    Convert an encoded upstream segment into MPEG-TS.
+    # 1. WebP with an EXIF chunk carrying the TS.
+    hit = webp_exif_ts(data)
+    if hit:
+        return hit
 
-    Supported formats from the original JavaScript:
+    # 2. PNG with the TS appended after IEND.
+    hit = png_iend_ts(data)
+    if hit:
+        return hit
 
-      1. WebP EXIF
-      2. PNG IEND
-      3. PNG pixel-hidden gzip
-      4. TIKTIKRAW
-      5. TIKTIKTGZ
-      6. Raw MPEG-TS
-    """
-
-    # 1. WebP EXIF
-    result = webp_exif_ts(data)
-    if result:
-        return result
-
-    # 2/3. PNG formats
-    is_png = (
-        len(data) >= 8
-        and data[0] == 0x89
-        and data[1] == 0x50
-    )
-
+    # 3. PNG with the TS hidden in the decoded pixels.
+    is_png = len(data) >= 8 and data[0] == 0x89 and data[1] == 0x50
     if is_png:
-
-        # TS after IEND
-        result = png_iend_ts(data)
-        if result:
-            return result
-
-        # TS hidden in PNG pixels
         try:
-            result = unwrap_pixels(data)
-            if result:
-                return result
-        except Exception:
-            pass
+            hit = unwrap_pixels(data)
+        except zlib.error:
+            # We catch every failure of the pixel path and report the
+            # generic "TS payload not found".
+            hit = None
+        if hit:
+            return hit
+        raise ValueError("TS payload not found")
 
-        raise ValueError("TS payload not found in PNG")
+    # 4. "TIKTIKRAW" marker followed by the raw TS.
+    for i in range(len(data) - len(MAGIC_TS_RAW)):
+        if data[i:i + len(MAGIC_TS_RAW)] == MAGIC_TS_RAW:
+            payload = data[i + len(MAGIC_TS_RAW):]
+            if payload and payload[0] == TS_SYNC:
+                return payload
 
-    # 4. TIKTIKRAW
-    marker = b"TIKTIKRAW"
+    # 5. "TIKTIKTSGZ" marker followed by a gzip-compressed TS.
+    for i in range(len(data) - len(MAGIC_TS_GZ)):
+        if data[i:i + len(MAGIC_TS_GZ)] == MAGIC_TS_GZ:
+            return gunzip(data[i + len(MAGIC_TS_GZ):])
 
-    for pos in find_all(data, marker):
-        ts = data[pos + len(marker):]
-
-        if ts and ts[0] == 0x47:
-            return ts
-
-    # 5. TIKTIKTGZ
-    marker = b"TIKTIKTGZ"
-
-    for pos in find_all(data, marker):
-        try:
-            ts = gzip.decompress(data[pos + len(marker):])
-
-            if ts and ts[0] == 0x47:
-                return ts
-        except Exception:
-            continue
-
-    # 6. Already MPEG-TS
-    for pos in range(len(data) - 188):
-        if data[pos] == 0x47 and data[pos + 188] == 0x47:
-            return data[pos:]
-
+    # 6. Fall back to scanning for the MPEG-TS sync pattern: 0x47 at offset
+    #    i and again at i+188 (the start of the next 188-byte packet).
+    for i in range(len(data) - TS_PACKET_SIZE):
+        if data[i] == TS_SYNC and data[i + TS_PACKET_SIZE] == TS_SYNC:
+            return data[i:]
     raise ValueError("TS payload not found")
 
 
-def find_all(data: bytes, needle: bytes):
-    """Yield every occurrence of needle."""
-    start = 0
+def unwrap_now(data: bytes) -> bytes:
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        return data
+    data = bytes(data)
 
-    while True:
-        pos = data.find(needle, start)
+    try:
+        out = unwrap_segment(data)
+    except zlib.error:
+        return data
 
-        if pos < 0:
-            return
-
-        yield pos
-        start = pos + 1
+    if not out or out[0] != TS_SYNC:
+        return data
+    return out
 
 
 @fastapi_app.get("/content/{path}/{host}")
@@ -436,7 +336,6 @@ async def content(path: str, host: str):
     try:
         host = step_daddy.content_url(host)
         headers = step_daddy._headers(referer=host)
-        
         async with step_daddy._session.stream(
                 "GET", step_daddy.content_url(path), headers=headers) as response:
             if response.status_code != 200:
@@ -459,12 +358,12 @@ async def content(path: str, host: str):
             encoded = bytearray()
 
             async for chunk in response.aiter_content(
-                chunk_size=8192 * 1024
+                chunk_size= 16384 * 1024
             ):
                 encoded.extend(chunk)
 
             try:
-                ts = unwrap_ts(bytes(encoded))
+                ts = unwrap_now(bytes(encoded))
 
             except Exception as exc:
                 return JSONResponse(
@@ -480,7 +379,7 @@ async def content(path: str, host: str):
             # ----------------------------------------------------------
 
             async def ts_stream():
-                chunk_size = 1024 * 1024
+                chunk_size = 16384 * 1024
 
                 for offset in range(
                     0,
@@ -497,7 +396,6 @@ async def content(path: str, host: str):
                     "Cache-Control": "no-cache",
                 },
             )
-
     except Exception as e:
         return JSONResponse(
             content={
