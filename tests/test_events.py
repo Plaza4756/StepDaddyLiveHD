@@ -121,8 +121,9 @@ def test_legacy_schedule_reuses_dlhd_title_for_rolled_events():
     assert [e["event"] for e in days[sun_22]["NBA Basketball 🏀"]] == ["Spurs", "Sunday game"]
 
 
-def test_legacy_schedule_title_ignores_locale(monkeypatch):
+def test_legacy_schedule_title_ignores_locale():
     import locale
+    previous = locale.setlocale(locale.LC_TIME)
     for name in ("de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8"):
         try:
             locale.setlocale(locale.LC_TIME, name)
@@ -135,7 +136,7 @@ def test_legacy_schedule_title_ignores_locale(monkeypatch):
         page = _one_day_page({"NBA Basketball 🏀": [("18:00", "Early game", "4"), ("01:00", "Spurs", "6")]})
         assert "Sunday 22 Nov 2026 - Schedule Time UK GMT" in legacy_schedule(parse_schedule(page))
     finally:
-        locale.setlocale(locale.LC_TIME, "C")
+        locale.setlocale(locale.LC_TIME, previous)
 
 
 def test_after_midnight_event_gets_a_slot_while_live():
