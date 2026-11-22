@@ -51,6 +51,54 @@ def test_parse_fields():
     assert duke.channels == ()  # id=00 placeholder and watchextra.php are skipped
 
 
+def _one_day_page(categories):
+    """Homepage markup with one day title, like DLHD's live page on 2026-11-21."""
+    cats = ""
+    for name, items in categories.items():
+        evs = "".join(
+            f'<div class="schedule__event"><div class="schedule__eventHeader">'
+            f'<span class="schedule__time" data-time="{t}">{t}</span>'
+            f'<span class="schedule__eventTitle">{title}</span></div>'
+            f'<div class="schedule__channels"><a href="/watch.php?id={cid}">NBA League Pass</a></div></div>'
+            for t, title, cid in items)
+        cats += (f'<div class="schedule__category"><div class="schedule__catHeader">'
+                 f'<div class="card__meta">{name}</div></div>{evs}</div>')
+    return (f'<section><div class="schedule" id="schedule"><div class="schedule__day">'
+            f'<div class="schedule__dayTitle">Saturday 21st Nov 2026 - Schedule Time UK GMT</div>'
+            f'{cats}</div></div></section>')
+
+
+def test_parse_rolls_after_midnight_events_to_next_day():
+    page = _one_day_page({
+        "NBA Basketball 🏀": [("18:00", "Early game", "4"), ("00:30", "Knicks", "5"),
+                              ("01:00", "Spurs vs Pelicans", "6"), ("03:00", "Kings", "7")],
+        "Handball 🤾": [("19:15", "A", "8"), ("19:00", "B", "9")],  # out of order, same day
+    })
+    starts = {e.title: e.start for e in parse_schedule(page)}
+    assert starts["Early game"] == at(21, 18)
+    assert starts["Knicks"] == at(22, 0, 30)
+    assert starts["Spurs vs Pelicans"] == at(22, 1)
+    assert starts["Kings"] == at(22, 3)
+    assert starts["A"] == at(21, 19, 15)
+    assert starts["B"] == at(21, 19)
+
+    days = legacy_schedule(parse_schedule(page))
+    assert [e["event"] for e in days["Sunday 22 Nov 2026 - Schedule Time UK GMT"]["NBA Basketball 🏀"]] == [
+        "Knicks", "Spurs vs Pelicans", "Kings"]
+    assert [e["event"] for e in days["Saturday 21st Nov 2026 - Schedule Time UK GMT"]["NBA Basketball 🏀"]] == [
+        "Early game"]
+
+
+def test_after_midnight_event_gets_a_slot_while_live():
+    page = _one_day_page({"NBA Basketball 🏀": [("18:00", "Early game", "4"),
+                                                ("01:00", "Spurs vs Pelicans", "6")]})
+    settings = EventSettings(slots=2)
+    p = SlotPlanner(settings)
+    p.set_events(parse_schedule(page), at(22, 2, 37))
+    live = {a.slot: a.event.title for a in p.assignments(at(22, 2, 37))}
+    assert "Spurs vs Pelicans" in live.values()
+
+
 def test_parse_missing_container():
     with pytest.raises(ScheduleParseError):
         parse_schedule("<html><div class='schedule'></div></html>")
@@ -254,6 +302,8 @@ def test_guide_xmltv():
     assert ("dlhd-10", "20261108040000 +0000", "20261108070000 +0000", "Overlap & co") in progs
     assert ("dlhd-event-01", "20261108030000 +0000", "20261108060000 +0000", spurs) in progs
     assert not any("Boxing" in p[3] for p in progs)  # Upcoming Events excluded
+    # Jellyfin files programmes under Sports only on an exact category match.
+    assert all("Sports" in [c.text for c in x.iter("category")] for x in root.iter("programme"))
 
 
 # --- slot playlist continuity ----------------------------------------------
