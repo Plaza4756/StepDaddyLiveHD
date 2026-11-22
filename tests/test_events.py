@@ -51,21 +51,31 @@ def test_parse_fields():
     assert duke.channels == ()  # id=00 placeholder and watchextra.php are skipped
 
 
+SAT_21 = "Saturday 21st Nov 2026 - Schedule Time UK GMT"
+
+
+def _schedule_page(*days):
+    """Homepage markup for (day title, {category: [(time, title, channel id)]}) blocks."""
+    blocks = ""
+    for day_title, categories in days:
+        cats = ""
+        for name, items in categories.items():
+            evs = "".join(
+                f'<div class="schedule__event"><div class="schedule__eventHeader">'
+                f'<span class="schedule__time" data-time="{t}">{t}</span>'
+                f'<span class="schedule__eventTitle">{title}</span></div>'
+                f'<div class="schedule__channels"><a href="/watch.php?id={cid}">NBA League Pass</a></div></div>'
+                for t, title, cid in items)
+            cats += (f'<div class="schedule__category"><div class="schedule__catHeader">'
+                     f'<div class="card__meta">{name}</div></div>{evs}</div>')
+        blocks += (f'<div class="schedule__day"><div class="schedule__dayTitle">{day_title}</div>'
+                   f'{cats}</div>')
+    return f'<section><div class="schedule" id="schedule">{blocks}</div></section>'
+
+
 def _one_day_page(categories):
     """Homepage markup with one day title, like DLHD's live page on 2026-11-21."""
-    cats = ""
-    for name, items in categories.items():
-        evs = "".join(
-            f'<div class="schedule__event"><div class="schedule__eventHeader">'
-            f'<span class="schedule__time" data-time="{t}">{t}</span>'
-            f'<span class="schedule__eventTitle">{title}</span></div>'
-            f'<div class="schedule__channels"><a href="/watch.php?id={cid}">NBA League Pass</a></div></div>'
-            for t, title, cid in items)
-        cats += (f'<div class="schedule__category"><div class="schedule__catHeader">'
-                 f'<div class="card__meta">{name}</div></div>{evs}</div>')
-    return (f'<section><div class="schedule" id="schedule"><div class="schedule__day">'
-            f'<div class="schedule__dayTitle">Saturday 21st Nov 2026 - Schedule Time UK GMT</div>'
-            f'{cats}</div></div></section>')
+    return _schedule_page((SAT_21, categories))
 
 
 def test_parse_rolls_after_midnight_events_to_next_day():
@@ -85,8 +95,47 @@ def test_parse_rolls_after_midnight_events_to_next_day():
     days = legacy_schedule(parse_schedule(page))
     assert [e["event"] for e in days["Sunday 22 Nov 2026 - Schedule Time UK GMT"]["NBA Basketball 🏀"]] == [
         "Knicks", "Spurs vs Pelicans", "Kings"]
-    assert [e["event"] for e in days["Saturday 21st Nov 2026 - Schedule Time UK GMT"]["NBA Basketball 🏀"]] == [
-        "Early game"]
+    assert [e["event"] for e in days[SAT_21]["NBA Basketball 🏀"]] == ["Early game"]
+
+
+def test_rollover_edges():
+    page = _one_day_page({
+        "Exactly six hours": [("20:00", "a", "1"), ("14:00", "b", "2")],  # not more than 6h: same day
+        "Late start": [("23:30", "c", "3"), ("00:00", "d", "4")],
+        "Two rollovers": [("22:00", "e", "5"), ("02:00", "f", "6"), ("23:00", "g", "7"), ("01:00", "h", "8")],
+    })
+    starts = {e.title: e.start for e in parse_schedule(page)}
+    assert (starts["a"], starts["b"]) == (at(21, 20), at(21, 14))
+    assert (starts["c"], starts["d"]) == (at(21, 23, 30), at(22, 0))
+    assert [starts[t] for t in "efgh"] == [at(21, 22), at(22, 2), at(22, 23), at(23, 1)]
+
+
+def test_legacy_schedule_reuses_dlhd_title_for_rolled_events():
+    sun_22 = "Sunday 22nd Nov 2026 - Schedule Time UK GMT"
+    page = _schedule_page(
+        (SAT_21, {"NBA Basketball 🏀": [("18:00", "Early game", "4"), ("01:00", "Spurs", "6")]}),
+        (sun_22, {"NBA Basketball 🏀": [("20:00", "Sunday game", "7")]}),
+    )
+    days = legacy_schedule(parse_schedule(page))
+    assert list(days) == [SAT_21, sun_22]
+    assert [e["event"] for e in days[sun_22]["NBA Basketball 🏀"]] == ["Spurs", "Sunday game"]
+
+
+def test_legacy_schedule_title_ignores_locale(monkeypatch):
+    import locale
+    for name in ("de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8"):
+        try:
+            locale.setlocale(locale.LC_TIME, name)
+            break
+        except locale.Error:
+            continue
+    else:
+        pytest.skip("no non-English locale installed")
+    try:
+        page = _one_day_page({"NBA Basketball 🏀": [("18:00", "Early game", "4"), ("01:00", "Spurs", "6")]})
+        assert "Sunday 22 Nov 2026 - Schedule Time UK GMT" in legacy_schedule(parse_schedule(page))
+    finally:
+        locale.setlocale(locale.LC_TIME, "C")
 
 
 def test_after_midnight_event_gets_a_slot_while_live():

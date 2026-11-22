@@ -96,6 +96,15 @@ def _parse_day(title: str) -> datetime | None:
         return None
 
 
+_WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def _day_title(dt: datetime) -> str:
+    """A DLHD-style day title for ``dt``, in English whatever the process locale."""
+    month = next(m for m, i in _MONTHS.items() if i == dt.month).capitalize()
+    return f"{_WEEKDAYS[dt.weekday()]} {dt.day:02d} {month} {dt.year} - Schedule Time UK GMT"
+
+
 def _parse_channels(fragment: str) -> tuple[EventChannel, ...]:
     channels: list[EventChannel] = []
     seen: set[str] = set()
@@ -168,13 +177,19 @@ def parse_schedule(page: str) -> list[Event]:
 
 def legacy_schedule(events: Iterable[Event]) -> dict:
     """Shape events like the old schedule-generated.php JSON the /schedule page reads."""
+    events = list(events)
+    titles: dict = {}  # date -> DLHD's own day title for it
+    for ev in events:
+        listed = _parse_day(ev.day)
+        if listed is not None:
+            titles.setdefault(listed.date(), ev.day)
     days: dict = {}
     for ev in events:
         day = ev.day
         listed = _parse_day(ev.day)
         if listed is not None and listed.date() != ev.start.date():
             # Listed after midnight under the previous day's title.
-            day = ev.start.strftime("%A %d %b %Y") + " - Schedule Time UK GMT"
+            day = titles.get(ev.start.date()) or _day_title(ev.start)
         days.setdefault(day, {}).setdefault(ev.category, []).append({
             "event": ev.title,
             "time": ev.time,
